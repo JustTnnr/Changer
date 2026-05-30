@@ -21,7 +21,7 @@ CPM1_API_KEY = "AIzaSyBW1ZbMiUeDZHYUO2bY8Bfnf5rRgrQGPTM"
 CPM2_API_KEY = "AIzaSyCQDz9rgjgmvmFkvVfmvr2-7fT4tfrzRRQ"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-ADMIN_ID = 6915342860
+ADMIN_ID = 8650959684
 
 DATA_DIR = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
