@@ -46,6 +46,24 @@ def get_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def login_request(email, password, api_key):
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+    resp = requests.post(url, json=payload)
+    return resp.json()
+
+
+def update_request(id_token, api_key, new_email=None, new_password=None):
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:update?key={api_key}"
+    payload = {"idToken": id_token, "returnSecureToken": True}
+    if new_email:
+        payload["email"] = new_email
+    if new_password:
+        payload["password"] = new_password
+    resp = requests.post(url, json=payload)
+    return resp.json()
+
+
 def box(title, lines):
     border = "————————————————————————"
     body = ""
@@ -576,3 +594,4 @@ app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message
 
 print("Bot is running...")
 app.run_polling()
+        
