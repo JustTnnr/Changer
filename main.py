@@ -158,7 +158,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Welcome to Ash Change Tool Bot",
+        "Welcome to TNNRs CPM 1 and 2 Login Changer Bot",
         reply_markup=build_menu(user_id),
     )
 
