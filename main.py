@@ -7,11 +7,10 @@ if sys.platform.startswith("win"):
 import os
 import time
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
-    CallbackQueryHandler,
     ContextTypes,
     MessageHandler,
     filters,
@@ -140,18 +139,36 @@ sessions = {}  # user_id -> {id_token, email, game_name, api_key}
 user_states = {}  # per-user step tracking
 
 # ===== MENU HELPERS =====
-def build_menu(user_id):
-    """Return a dynamic keyboard depending on login state."""
+def build_menu_text(user_id):
+    """Return a text-based menu depending on login state."""
     if user_id in sessions:
-        keyboard = [
-            [InlineKeyboardButton("✉️ Change Email", callback_data="changemail")],
-            [InlineKeyboardButton("🔑 Change Password", callback_data="changepass")],
-            [InlineKeyboardButton("🚪 Logout", callback_data="logout")]
-        ]
+        session_info = sessions[user_id]
+        menu_text = f"""
+🎮 **TNNR Change Tool Bot** 🎮
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ **Logged in as:** {session_info['email']}
+🎯 **Game:** {session_info['game_name']}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**Available Options:**
+1️⃣ Type: `changemail` - Change your email
+2️⃣ Type: `changepass` - Change your password
+3️⃣ Type: `logout` - Logout from the bot
+
+What would you like to do?
+"""
     else:
-        keyboard = [[InlineKeyboardButton("💻 Login", callback_data="login")]]
-    return InlineKeyboardMarkup(keyboard)
-    
+        menu_text = """
+🎮 **TNNR Change Tool Bot** 🎮
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You are not logged in.
+
+**Available Options:**
+1️⃣ Type: `login` - Login to your game account
+
+What would you like to do?
+"""
+    return menu_text
     
 # ===== ACCESS CHECK =====
 def is_allowed(user_id):
@@ -168,74 +185,83 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "✨ Welcome to TNNR Change Tool Bot ✨",
-        reply_markup=build_menu(user_id)
+        build_menu_text(user_id),
+        parse_mode="Markdown"
     )
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = query.data
-    
-    if not is_allowed(user_id):
-        await query.edit_message_text("❌ Unauthorized.")
-        return
-    
-    
-    # ----- LOGIN FLOW -----
-    if data == "login":
-        keyboard = [
-            [InlineKeyboardButton("CPM1", callback_data="login_CPM1")],
-            [InlineKeyboardButton("CPM2", callback_data="login_CPM2")]
-        ]
-        await query.edit_message_text("Select game:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif data.startswith("login_"):
-        game = data.split("_")[1]
-        context.user_data['login_game'] = game
-        context.user_data['api_key'] = CPM1_API_KEY if game=="CPM1" else CPM2_API_KEY
-        context.user_data['step'] = 'email'
-        await query.edit_message_text(f"📝 Enter your email for {game}:")
-
-    # ----- CHANGE EMAIL -----
-    elif data == "changemail":
-        if user_id not in sessions:
-            await query.edit_message_text("⚠️ You must login first.")
-            return
-        context.user_data['step'] = 'changemail'
-        await query.edit_message_text("✉️ Enter new email:")
-
-    # ----- CHANGE PASSWORD -----
-    elif data == "changepass":
-        if user_id not in sessions:
-            await query.edit_message_text("⚠️ You must login first.")
-            return
-        context.user_data['step'] = 'changepass'
-        await query.edit_message_text("🔑 Enter new password:")
-
-    # ----- LOGOUT -----
-    elif data == "logout":
-        if user_id in sessions:
-            del sessions[user_id]
-            await query.edit_message_text("🚪 Logged out successfully.", reply_markup=build_menu(user_id))
-        else:
-            await query.edit_message_text("⚠️ You are not logged in.", reply_markup=build_menu(user_id))
 
 # ----- MESSAGE HANDLER -----
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text
+    text = update.message.text.strip().lower()
     step = context.user_data.get('step')
     
     if not is_allowed(user_id):
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+
+    # ----- MAIN MENU COMMANDS -----
+    if text == "login":
+        if user_id in sessions:
+            await update.message.reply_text("⚠️ You are already logged in. Type `logout` first.")
+            return
+        
+        game_selection = """
+🎮 **Select Your Game:**
+━━━━━━━━━━━━━━━━━━━━━━
+Type one of the following:
+
+1️⃣ Type: `cpm1` - Login to CPM1
+2️⃣ Type: `cpm2` - Login to CPM2
+
+Which game would you like to login to?
+"""
+        await update.message.reply_text(game_selection, parse_mode="Markdown")
+        context.user_data['step'] = 'select_game'
+        return
+
+    elif text == "changemail":
+        if user_id not in sessions:
+            await update.message.reply_text("⚠️ You must login first. Type `login` to start.")
+            return
+        context.user_data['step'] = 'changemail'
+        await update.message.reply_text("✉️ Enter your new email address:")
+        return
+
+    elif text == "changepass":
+        if user_id not in sessions:
+            await update.message.reply_text("⚠️ You must login first. Type `login` to start.")
+            return
+        context.user_data['step'] = 'changepass'
+        await update.message.reply_text("🔑 Enter your new password:")
+        return
+
+    elif text == "logout":
+        if user_id in sessions:
+            del sessions[user_id]
+            await update.message.reply_text("🚪 Logged out successfully.\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+        else:
+            await update.message.reply_text("⚠️ You are not logged in.", parse_mode="Markdown")
+        context.user_data.clear()
+        return
+
+    # ----- GAME SELECTION -----
+    elif step == 'select_game':
+        if text in ['cpm1', 'cpm2']:
+            game = text.upper()
+            context.user_data['login_game'] = game
+            context.user_data['api_key'] = CPM1_API_KEY if game == "CPM1" else CPM2_API_KEY
+            context.user_data['step'] = 'email'
+            await update.message.reply_text(f"📝 Enter your email for {game}:")
+        else:
+            await update.message.reply_text("❌ Invalid option. Please type `cpm1` or `cpm2`.")
         return
 
     # ----- EMAIL -----
-    if step == 'email':
+    elif step == 'email':
         context.user_data['email'] = text
         context.user_data['step'] = 'password'
         await update.message.reply_text("🔒 Now enter your password:")
+        return
 
     # ----- PASSWORD -----
     elif step == 'password':
@@ -251,7 +277,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         resp = login_request(email, password, api_key)
         if "idToken" not in resp:
             error_msg = resp.get("error", {}).get("message", "Unknown error")
-            await update.message.reply_text(f"❌ Login failed: {error_msg}", reply_markup=build_menu(user_id))
+            await update.message.reply_text(f"❌ Login failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
             context.user_data.clear()
             return
 
@@ -261,13 +287,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "game_name": game_name,
             "api_key": api_key
         }
-        await update.message.reply_text(f"✅ Logged in as {sessions[user_id]['email']} ({game_name})", reply_markup=build_menu(user_id))
+        await update.message.reply_text(f"✅ Logged in as {sessions[user_id]['email']} ({game_name})\n\n" + build_menu_text(user_id), parse_mode="Markdown")
         context.user_data.clear()
+        return
 
     # ----- CHANGE EMAIL -----
     elif step == 'changemail':
         if user_id not in sessions:
-            await update.message.reply_text("⚠️ You must login first.", reply_markup=build_menu(user_id))
+            await update.message.reply_text("⚠️ You must login first.", parse_mode="Markdown")
+            context.user_data.clear()
             return
         new_email = text
         s = sessions[user_id]
@@ -279,16 +307,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "email" in change_resp:
             s['email'] = change_resp['email']
             s['id_token'] = change_resp.get('idToken', s['id_token'])
-            await update.message.reply_text(f"✉️ Email updated to {s['email']}", reply_markup=build_menu(user_id))
+            await update.message.reply_text(f"✉️ Email updated to {s['email']}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
         else:
             error_msg = change_resp.get("error", {}).get("message", "Unknown error")
-            await update.message.reply_text(f"❌ Failed: {error_msg}", reply_markup=build_menu(user_id))
+            await update.message.reply_text(f"❌ Failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
         context.user_data.clear()
+        return
 
     # ----- CHANGE PASSWORD -----
     elif step == 'changepass':
         if user_id not in sessions:
-            await update.message.reply_text("⚠️ You must login first.", reply_markup=build_menu(user_id))
+            await update.message.reply_text("⚠️ You must login first.", parse_mode="Markdown")
+            context.user_data.clear()
             return
         new_pass = text
         s = sessions[user_id]
@@ -299,11 +329,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         change_resp = update_request(s['id_token'], s['api_key'], new_password=new_pass)
         if "idToken" in change_resp:
             s['id_token'] = change_resp['idToken']
-            await update.message.reply_text("🔑 Password changed successfully", reply_markup=build_menu(user_id))
+            await update.message.reply_text(f"🔑 Password changed successfully\n\n" + build_menu_text(user_id), parse_mode="Markdown")
         else:
             error_msg = change_resp.get("error", {}).get("message", "Unknown error")
-            await update.message.reply_text(f"❌ Failed: {error_msg}", reply_markup=build_menu(user_id))
+            await update.message.reply_text(f"❌ Failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
         context.user_data.clear()
+        return
+
+    # ----- UNRECOGNIZED INPUT -----
+    else:
+        await update.message.reply_text("❓ I didn't understand that. Type `/start` to see available options.", parse_mode="Markdown")
 
 # ===== BOT STARTUP =====
 app = Application.builder().token(BOT_TOKEN).build()
@@ -311,7 +346,6 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("add", add_user))
 app.add_handler(CommandHandler("remove", remove_user))
 app.add_handler(CommandHandler("users", list_users))
-app.add_handler(CallbackQueryHandler(button_handler))
 app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
 print("🚀 Bot is running...")
