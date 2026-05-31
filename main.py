@@ -102,6 +102,33 @@ async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid Telegram ID")
 
 
+async def bulk_add_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to bulk add users from comma/newline-separated list."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    bulk_help = """
+📋 **Bulk Add Users**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Usage: Send a list of Telegram IDs separated by:
+- Commas: `123456,789012,345678`
+- New lines: Each ID on a new line
+- Spaces: `123456 789012 345678`
+
+Example:
+```
+/bulkadd
+123456789
+987654321
+555666777
+```
+
+Type your list:
+"""
+    context.user_data['step'] = 'bulk_add'
+    await update.message.reply_text(bulk_help, parse_mode="Markdown")
+
+
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -194,6 +221,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip().lower()
     step = context.user_data.get('step')
+    
+    # ----- ADMIN: BULK ADD USERS -----
+    if step == 'bulk_add':
+        if user_id != ADMIN_ID:
+            return
+        
+        # Parse the input - support comma, newline, or space separated IDs
+        ids_text = update.message.text.strip()
+        
+        # Try different separators
+        if ',' in ids_text:
+            user_ids = [x.strip() for x in ids_text.split(',')]
+        elif '\n' in ids_text:
+            user_ids = [x.strip() for x in ids_text.split('\n')]
+        else:
+            user_ids = ids_text.split()
+        
+        added = []
+        failed = []
+        already_exist = []
+        
+        for uid_str in user_ids:
+            try:
+                uid = int(uid_str)
+                
+                if uid in allowed_users:
+                    already_exist.append(uid)
+                else:
+                    allowed_users.add(uid)
+                    added.append(uid)
+            except ValueError:
+                failed.append(uid_str)
+        
+        save_users()
+        
+        # Build response
+        response = "📊 **Bulk Add Results:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        
+        if added:
+            response += f"✅ **Added ({len(added)}):** " + ", ".join(map(str, added)) + "\n"
+        if already_exist:
+            response += f"⚠️ **Already exist ({len(already_exist)}):** " + ", ".join(map(str, already_exist)) + "\n"
+        if failed:
+            response += f"❌ **Invalid IDs ({len(failed)}):** " + ", ".join(failed) + "\n"
+        
+        response += f"\n**Total Users:** {len(allowed_users)}"
+        
+        await update.message.reply_text(response, parse_mode="Markdown")
+        context.user_data.clear()
+        return
     
     if not is_allowed(user_id):
         await update.message.reply_text("❌ You are not authorized to use this bot.")
@@ -345,6 +422,7 @@ app = Application.builder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("add", add_user))
 app.add_handler(CommandHandler("remove", remove_user))
+app.add_handler(CommandHandler("bulkadd", bulk_add_users))
 app.add_handler(CommandHandler("users", list_users))
 app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
