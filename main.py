@@ -19,7 +19,7 @@ from telegram.ext import (
 # ===== CONFIG =====
 CPM1_API_KEY = "AIzaSyBW1ZbMiUeDZHYUO2bY8Bfnf5rRgrQGPTM"
 CPM2_API_KEY = "AIzaSyCQDz9rgjgmvmFkvVfmvr2-7fT4tfrzRRQ"
-BOT_TOKEN = "8496323687:AAFyWCbdJqciZFFvLbj6GFEQVn4qVLR6x-c"
+BOT_TOKEN = "8496323687:AAFLhc2UY4Z_afiKNjAFRfpg9i325oiv-UA"
 
 # ===== ADMIN CONFIG =====
 ADMIN_ID = 8650959684  # replace with your Telegram ID
