@@ -733,5 +733,18 @@ app.add_handler(CommandHandler("users", list_users))
 app.add_handler(CallbackQueryHandler(button_handler))
 app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-print("Bot is running...")
-app.run_polling()
+# --- Webhook Setup ---
+PORT = int(os.getenv("PORT", 8080))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+if WEBHOOK_URL:
+    print(f"Starting bot with webhook on port {PORT}...")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path="/telegram",
+        webhook_url=f"{WEBHOOK_URL}/telegram"
+    )
+else:
+    print("WEBHOOK_URL not set. Bot will use polling mode.")
+    app.run_polling()
