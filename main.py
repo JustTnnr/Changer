@@ -9,6 +9,7 @@ import time
 import requests
 import re
 import aiohttp
+import json
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -148,6 +149,29 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+# ===== ADMIN RECOVER COMMAND =====
+async def admin_recover(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only email recovery command"""
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Unauthorized. Admin only.")
+        return
+    
+    game_selection = """
+🔐 **ADMIN: Email Recovery**
+━━━━━━━━━━━━━━━━━━━━━━
+Select Your Game:
+
+1️⃣ Type: `cpm1` - Recover CPM1 Accounts
+2️⃣ Type: `cpm2` - Recover CPM2 Accounts
+
+Which game would you like to recover?
+"""
+    await update.message.reply_text(game_selection, parse_mode="Markdown")
+    context.user_data['step'] = 'admin_recover_game'
+
+
 # ===== CPM FUNCTIONS =====
 def login_request(email, password, api_key):
     url = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key={api_key}"
@@ -266,8 +290,7 @@ def build_menu_text(user_id):
 **Available Options:**
 1️⃣ Type: `changemail` - Change your email
 2️⃣ Type: `changepass` - Change your password
-3️⃣ Type: `recover` - Recover account with email pattern
-4️⃣ Type: `logout` - Logout from the bot
+3️⃣ Type: `logout` - Logout from the bot
 
 What would you like to do?
 """
@@ -279,7 +302,6 @@ You are not logged in.
 
 **Available Options:**
 1️⃣ Type: `login` - Login to your game account
-2️⃣ Type: `recover` - Recover account with email pattern
 
 What would you like to do?
 """
@@ -400,21 +422,6 @@ Which game would you like to login to?
         await update.message.reply_text("🔑 Enter your new password:")
         return
 
-    elif text == "recover":
-        game_selection = """
-🎮 **Select Your Game:**
-━━━━━━━━━━━━━━━━━━━━━━
-Type one of the following:
-
-1️⃣ Type: `cpm1` - Recover CPM1 Account
-2️⃣ Type: `cpm2` - Recover CPM2 Account
-
-Which game would you like to recover?
-"""
-        await update.message.reply_text(game_selection, parse_mode="Markdown")
-        context.user_data['step'] = 'recover_game'
-        return
-
     elif text == "logout":
         if user_id in sessions:
             del sessions[user_id]
@@ -436,15 +443,19 @@ Which game would you like to recover?
             await update.message.reply_text("❌ Invalid option. Please type `cpm1` or `cpm2`.")
         return
 
-    # ----- EMAIL RECOVERY GAME SELECTION -----
-    elif step == 'recover_game':
+    # ----- ADMIN EMAIL RECOVERY GAME SELECTION -----
+    elif step == 'admin_recover_game':
+        if user_id != ADMIN_ID:
+            await update.message.reply_text("❌ Unauthorized.")
+            return
+            
         if text in ['cpm1', 'cpm2']:
             game = text.upper()
             context.user_data['recover_game'] = game
             context.user_data['recover_api_key'] = CPM1_API_KEY if game == "CPM1" else CPM2_API_KEY
-            context.user_data['step'] = 'recover_pattern'
+            context.user_data['step'] = 'admin_recover_pattern'
             recover_help = f"""
-📧 **Email Recovery for {game}**
+📧 **ADMIN: Email Recovery for {game}**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Enter an email pattern to check:
@@ -454,10 +465,10 @@ Enter an email pattern to check:
 - `tannercpm(1000-5000)@gmail.com` - Checks emails 1000 to 5000
 - `user(100-200)@domain.com` - Custom range
 
-⚡ **NEW: ULTRA-FAST MODE**
-- Now checks 50 emails CONCURRENTLY
+⚡ **ULTRA-FAST MODE**
+- Checks 50 emails CONCURRENTLY
 - 10,000 emails in ~20 seconds
-- Much faster than before!
+- Results exported to JSON file
 
 Enter your pattern:
 """
@@ -466,8 +477,12 @@ Enter your pattern:
             await update.message.reply_text("❌ Invalid option. Please type `cpm1` or `cpm2`.")
         return
 
-    # ----- EMAIL RECOVERY PATTERN -----
-    elif step == 'recover_pattern':
+    # ----- ADMIN EMAIL RECOVERY PATTERN -----
+    elif step == 'admin_recover_pattern':
+        if user_id != ADMIN_ID:
+            await update.message.reply_text("❌ Unauthorized.")
+            return
+            
         pattern = update.message.text.strip()
         parsed = parse_email_pattern(pattern)
         
@@ -483,8 +498,7 @@ Enter your pattern:
             await update.message.reply_text(f"❌ Range too large ({total} emails). Max 50,000 per check.")
             return
         
-        context.user_data['recover_password'] = None
-        context.user_data['step'] = 'recover_password_input'
+        context.user_data['step'] = 'admin_recover_password_input'
         await update.message.reply_text(f"""
 🔐 **Enter Password to Check**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -499,10 +513,13 @@ Enter the password to check:
         context.user_data['recover_domain'] = domain
         return
 
-    # ----- EMAIL RECOVERY PASSWORD INPUT -----
-    elif step == 'recover_password_input':
+    # ----- ADMIN EMAIL RECOVERY PASSWORD INPUT -----
+    elif step == 'admin_recover_password_input':
+        if user_id != ADMIN_ID:
+            await update.message.reply_text("❌ Unauthorized.")
+            return
+            
         password = update.message.text.strip()
-        context.user_data['recover_password'] = password
         
         base = context.user_data['recover_base']
         start = context.user_data['recover_start']
@@ -554,41 +571,59 @@ ETA: **{int(remaining)}s**
         
         elapsed = time.time() - start_time
         
-        # Filter results
-        found_emails = [r for r in results if r[1] in ["found", "wrong_password"]]
+        # Filter ONLY found emails (correct password)
+        found_emails = [r for r in results if r[1] == "found"]
         
-        # Build results
+        # Create output file with results
+        output_data = {
+            "game": game,
+            "pattern": f"{base}({start}-{end})@{domain}",
+            "total_checked": total,
+            "time_seconds": round(elapsed, 2),
+            "speed_emails_per_sec": round(len(emails)/elapsed, 2),
+            "found_count": len(found_emails),
+            "successful_logins": []
+        }
+        
+        # Add found email details
+        for email, status, data in found_emails:
+            output_data["successful_logins"].append({
+                "email": email,
+                "password": password,
+                "game": game
+            })
+        
+        # Save to file
+        filename = f"recovery_{game.lower()}_{int(time.time())}.json"
+        with open(filename, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        
+        # Send results
         if found_emails:
             results_text = f"""
 ✅ **RECOVERY COMPLETE**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Game: **{game}**
-Found: **{len(found_emails)} email(s)**
+Found: **{len(found_emails)} account(s)** ✅
 Time: **{elapsed:.1f}s**
 Speed: **{len(emails)/elapsed:.1f} emails/sec**
 
-**Results:**
+📄 Results saved to file
 """
-            for email, status, data in found_emails[:50]:
-                if status == "found":
-                    results_text += f"\n✅ **FOUND** `{email}`"
-                else:
-                    results_text += f"\n⚠️ **EXISTS** `{email}`"
-            
-            if len(found_emails) > 50:
-                results_text += f"\n\n... and {len(found_emails) - 50} more"
-            
             await update.message.reply_text(results_text, parse_mode="Markdown")
+            
+            # Send file
+            with open(filename, 'rb') as f:
+                await update.message.reply_document(document=f, filename=filename)
         else:
             await update.message.reply_text(f"""
 ❌ **RECOVERY COMPLETE**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-No matching emails found.
+No matching accounts found.
 Time: **{elapsed:.1f}s**
 Speed: **{len(emails)/elapsed:.1f} emails/sec**
 """, parse_mode="Markdown")
         
-        await update.message.reply_text(build_menu_text(user_id), parse_mode="Markdown")
         context.user_data.clear()
         return
 
@@ -683,6 +718,7 @@ app.add_handler(CommandHandler("add", add_user))
 app.add_handler(CommandHandler("remove", remove_user))
 app.add_handler(CommandHandler("bulkadd", bulk_add_users))
 app.add_handler(CommandHandler("users", list_users))
+app.add_handler(CommandHandler("recover", admin_recover))
 app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
 print("🚀 Bot is running...")
