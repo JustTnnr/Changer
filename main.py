@@ -639,7 +639,14 @@ Speed: **{total/elapsed:.1f} emails/sec**
         
         context.user_data.clear()
         return
+ 
+    # ----- ADMIN EMAIL RECOVERY PASSWORD INPUT -----
+    elif step == 'admin_recover_password_input':
 
+        # your recovery logic here
+
+        context.user_data.clear()
+        return
     # ----- EMAIL -----
     elif step == 'email':
         context.user_data['email'] = text
