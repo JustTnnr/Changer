@@ -324,7 +324,7 @@ def is_allowed(user_id):
 # ==== START FUNCTION =====
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    )
+    
 
 # ----- MESSAGE HANDLER -----
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
