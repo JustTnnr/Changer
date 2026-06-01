@@ -245,11 +245,11 @@ async def check_emails_concurrent_generator(base, start, end, domain, password, 
     
     # Determine optimal batch size (1000 is the maximum safe limit)
     # For massive ranges, we use 1000 concurrent requests
-    batch_size = min(1000, total)  # Use 1000 or total if smaller
+    batch_size = min(10000, total)  # Use 1000 or total if smaller
     
     # Reuse session across all requests for maximum speed
-    # Limit set to 1000 for extreme concurrency
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=1000)) as session:
+    # Limit set to 10000 for extreme concurrency
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=10000)) as session:
         for batch_start in range(start, end + 1, batch_size):
             batch_end = min(batch_start + batch_size, end + 1)
             
