@@ -550,26 +550,26 @@ Concurrency: **5000 emails at a time**
         checked_count = 0
         
         # Progress callback
-last_update_time = 0
+        last_update_time = 0
 
-async def update_progress(checked, total_emails, found):
-    nonlocal checked_count, last_update_time
+        async def update_progress(checked, total_emails, found):
+            nonlocal checked_count, last_update_time
 
-    current_time = time.time()
+            current_time = time.time()
 
-    # Only update Telegram every 4 minutes
-    if current_time - last_update_time < 240:
-        return
+            # Only update Telegram every 4 minutes
+            if current_time - last_update_time < 240:
+                return
 
-    last_update_time = current_time
-    checked_count = checked
+            last_update_time = current_time
+            checked_count = checked
 
-    elapsed = current_time - start_time
-    speed = checked / elapsed if elapsed > 0 else 0
-    remaining = (total_emails - checked) / speed if speed > 0 else 0
+            elapsed = current_time - start_time
+            speed = checked / elapsed if elapsed > 0 else 0
+            remaining = (total_emails - checked) / speed if speed > 0 else 0
 
-    try:
-        await progress_msg.edit_text(f"""
+            try:
+                await progress_msg.edit_text(f"""
 ⚡ **MAXIMUM CONCURRENCY EMAIL RECOVERY**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Game: **{game}**
@@ -582,8 +582,8 @@ ETA: **{int(remaining)}s**
 ⏱ Updates every 4 minutes
 """, parse_mode="Markdown")
 
-    except Exception as e:
-        print(f"Progress update failed: {e}")
+            except Exception as e:
+                print(f"Progress update failed: {e}")
         
         # Run concurrent check with generator (no memory buildup)
         async for email, status, data in check_emails_concurrent_generator(base, start, end, domain, password, api_key, progress_callback=update_progress):
@@ -640,13 +640,6 @@ Speed: **{total/elapsed:.1f} emails/sec**
         context.user_data.clear()
         return
  
-    # ----- ADMIN EMAIL RECOVERY PASSWORD INPUT -----
-    elif step == 'admin_recover_password_input':
-
-        # your recovery logic here
-
-        context.user_data.clear()
-        return
     # ----- EMAIL -----
     elif step == 'email':
         context.user_data['email'] = text
