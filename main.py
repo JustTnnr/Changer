@@ -466,7 +466,7 @@ Enter an email pattern to check:
 - `tannercpm(1-100000)@domain.com` - Checks 100K emails
 
 ⚡ **MAXIMUM CONCURRENCY MODE**
-- 1000 concurrent requests per batch
+- 5000 concurrent requests per batch
 - No limit on range size (1M-99M with ease)
 - Memory efficient streaming
 - Results streamed to JSON
@@ -536,7 +536,7 @@ Pattern: **{base}({start:,}-{end:,})@{domain}**
 Total: **{total:,} emails**
 Status: **Starting...**
 
-Concurrency: **1000 emails at a time**
+Concurrency: **5000 emails at a time**
 """, parse_mode="Markdown")
         
         await context.bot.send_chat_action(update.effective_chat.id, "typing")
