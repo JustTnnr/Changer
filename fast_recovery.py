@@ -4,7 +4,7 @@ import aiohttp
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-executor = ThreadPoolExecutor(max_workers=100)
+executor = ThreadPoolExecutor(max_workers=10000)
 
 def parse_email_pattern(pattern):
     """Parse email patterns"""
