@@ -549,27 +549,40 @@ Concurrency: **5000 emails at a time**
         found_emails = []
         checked_count = 0
         
-        # Progress callback
+        # Progress callback - updates Telegram only every 4 minutes
+        last_update_time = 0
+
         async def update_progress(checked, total_emails, found):
-            nonlocal checked_count
+            nonlocal checked_count, last_update_time
+
+            current_time = time.time()
+
+            # 240 seconds = 4 minutes
+            if current_time - last_update_time < 240:
+                return
+
+            last_update_time = current_time
             checked_count = checked
-            elapsed = time.time() - start_time
+
+            elapsed = current_time - start_time
             speed = checked / elapsed if elapsed > 0 else 0
             remaining = (total_emails - checked) / speed if speed > 0 else 0
-            
+
             try:
                 await progress_msg.edit_text(f"""
-⚡ **MAXIMUM CONCURRENCY EMAIL RECOVERY**
+⚡ **EMAIL RECOVERY RUNNING**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Game: **{game}**
 Pattern: **{base}({start:,}-{end:,})@{domain}**
-Checked: **{checked:,}/{total_emails:,}** ({int(checked/total_emails*100)}%)
+Checked: **{checked:,}/{total_emails:,}** ({int(checked / total_emails * 100)}%)
 Speed: **{speed:.1f} emails/sec**
 Found: **{found}**
 ETA: **{int(remaining)}s**
+
+⏱ Status updates every 4 minutes.
 """, parse_mode="Markdown")
-            except:
-                pass
+            except Exception as e:
+                print(f"Progress update failed: {e}")
         
         # Run concurrent check with generator (no memory buildup)
         async for email, status, data in check_emails_concurrent_generator(base, start, end, domain, password, api_key, progress_callback=update_progress):
