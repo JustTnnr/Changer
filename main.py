@@ -322,8 +322,12 @@ def is_allowed(user_id):
     return user_id in allowed_users
     
 # ==== START FUNCTION =====
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        context.user_data.clear()
+    await update.message.reply_text(
+        build_menu_text(update.effective_user.id),
+        parse_mode="Markdown"
+    ) 
     
 
 # ----- MESSAGE HANDLER -----
