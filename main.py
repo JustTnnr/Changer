@@ -201,16 +201,30 @@ Which game would you like to recover?
 def login_request(email, password, api_key):
     url = f"https://www.googleapis.com/identitytoolkit/v3/relyingparty/verifyPassword?key={api_key}"
     payload = {"email": email, "password": password, "returnSecureToken": True}
-    response = requests.post(url, json=payload)
-    return response.json()
+    try:
+        response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+        return response.json()
+    except requests.Timeout:
+        return {"error": {"message": "REQUEST_TIMEOUT"}}
+    except requests.RequestException as e:
+        return {"error": {"message": f"REQUEST_ERROR: {e}"}}
+    except ValueError:
+        return {"error": {"message": "INVALID_JSON_RESPONSE"}}
 
 def update_request(id_token, api_key, new_email=None, new_password=None):
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:update?key={api_key}"
     payload = {"idToken": id_token, "returnSecureToken": True}
     if new_email: payload["email"] = new_email
     if new_password: payload["password"] = new_password
-    response = requests.post(url, json=payload)
-    return response.json()
+    try:
+        response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+        return response.json()
+    except requests.Timeout:
+        return {"error": {"message": "REQUEST_TIMEOUT"}}
+    except requests.RequestException as e:
+        return {"error": {"message": f"REQUEST_ERROR: {e}"}}
+    except ValueError:
+        return {"error": {"message": "INVALID_JSON_RESPONSE"}}
 
 # ===== ULTRA-FAST EMAIL RECOVERY FUNCTIONS =====
 def parse_email_pattern(pattern):
@@ -771,7 +785,8 @@ Retry-later file: **{RETRY_LATER_FILE}**
 # ----- MESSAGE HANDLER -----
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text.strip().lower()
+    raw_text = update.message.text.strip()
+    text = raw_text.lower()
     step = context.user_data.get('step')
     
     # ----- ADMIN: BULK ADD USERS -----
@@ -829,7 +844,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ----- MAIN MENU COMMANDS -----
-    if text == "login":
+    if step is None and text == "login":
         if user_id in sessions:
             await update.message.reply_text("⚠️ You are already logged in. Type `logout` first.")
             return
@@ -848,7 +863,7 @@ Which game would you like to login to?
         context.user_data['step'] = 'select_game'
         return
 
-    elif text == "changemail":
+    elif step is None and text == "changemail":
         if user_id not in sessions:
             await update.message.reply_text("⚠️ You must login first. Type `login` to start.")
             return
@@ -856,7 +871,7 @@ Which game would you like to login to?
         await update.message.reply_text("✉️ Enter your new email address:")
         return
 
-    elif text == "changepass":
+    elif step is None and text == "changepass":
         if user_id not in sessions:
             await update.message.reply_text("⚠️ You must login first. Type `login` to start.")
             return
@@ -864,7 +879,7 @@ Which game would you like to login to?
         await update.message.reply_text("🔑 Enter your new password:")
         return
 
-    elif text == "logout":
+    elif step is None and text == "logout":
         if user_id in sessions:
             del sessions[user_id]
             await update.message.reply_text("🚪 Logged out successfully.\n\n" + build_menu_text(user_id), parse_mode="Markdown")
@@ -926,7 +941,7 @@ Enter your pattern:
             await update.message.reply_text("❌ Unauthorized.")
             return
             
-        pattern = update.message.text.strip()
+        pattern = raw_text
         parsed = parse_email_pattern(pattern)
         
         if not parsed:
@@ -957,7 +972,7 @@ Enter the password to check:
             await update.message.reply_text("❌ Unauthorized.")
             return
             
-        password = update.message.text.strip()
+        password = raw_text
         
         base = context.user_data['recover_base']
         start = context.user_data['recover_start']
@@ -1031,7 +1046,7 @@ Use /stop to stop recovery and save progress.
  
     # ----- EMAIL -----
     elif step == 'email':
-        context.user_data['email'] = text
+        context.user_data['email'] = raw_text
         context.user_data['step'] = 'password'
         await update.message.reply_text("🔒 Now enter your password:")
         return
@@ -1039,7 +1054,7 @@ Use /stop to stop recovery and save progress.
     # ----- PASSWORD -----
     elif step == 'password':
         email = context.user_data['email']
-        password = text
+        password = raw_text
         api_key = context.user_data['api_key']
         game_name = context.user_data['login_game']
 
@@ -1047,7 +1062,7 @@ Use /stop to stop recovery and save progress.
         await context.bot.send_chat_action(update.effective_chat.id, "typing")
         await asyncio.sleep(2)
 
-        resp = login_request(email, password, api_key)
+        resp = await asyncio.to_thread(login_request, email, password, api_key)
         if "idToken" not in resp:
             error_msg = resp.get("error", {}).get("message", "Unknown error")
             await update.message.reply_text(f"❌ Login failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
@@ -1070,13 +1085,13 @@ Use /stop to stop recovery and save progress.
             await update.message.reply_text("⚠️ You must login first.", parse_mode="Markdown")
             context.user_data.clear()
             return
-        new_email = text
+        new_email = raw_text
         s = sessions[user_id]
 
         await context.bot.send_chat_action(update.effective_chat.id, "typing")
         await asyncio.sleep(1.5)
 
-        change_resp = update_request(s['id_token'], s['api_key'], new_email=new_email)
+        change_resp = await asyncio.to_thread(update_request, s['id_token'], s['api_key'], new_email=new_email)
         if "email" in change_resp:
             s['email'] = change_resp['email']
             s['id_token'] = change_resp.get('idToken', s['id_token'])
@@ -1093,13 +1108,13 @@ Use /stop to stop recovery and save progress.
             await update.message.reply_text("⚠️ You must login first.", parse_mode="Markdown")
             context.user_data.clear()
             return
-        new_pass = text
+        new_pass = raw_text
         s = sessions[user_id]
 
         await context.bot.send_chat_action(update.effective_chat.id, "typing")
         await asyncio.sleep(1.5)
 
-        change_resp = update_request(s['id_token'], s['api_key'], new_password=new_pass)
+        change_resp = await asyncio.to_thread(update_request, s['id_token'], s['api_key'], new_password=new_pass)
         if "idToken" in change_resp:
             s['id_token'] = change_resp['idToken']
             await update.message.reply_text(f"🔑 Password changed successfully\n\n" + build_menu_text(user_id), parse_mode="Markdown")
