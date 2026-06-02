@@ -11,6 +11,7 @@ import re
 import aiohttp
 import json
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -554,6 +555,63 @@ What would you like to do?
 # ===== ACCESS CHECK =====
 def is_allowed(user_id):
     return user_id in allowed_users
+
+# ===== SAFE REPLY / ACCOUNT HELPERS =====
+async def safe_reply_text(update: Update, text, parse_mode=None, fallback_text=None):
+    """Send a Telegram reply and fall back safely if Markdown parsing fails.
+
+    Dynamic account API errors and user emails can contain Markdown control
+    characters (especially underscores). A Telegram BadRequest during reply
+    sending otherwise makes the bot look like it is typing forever and never
+    answers the user.
+    """
+    try:
+        return await update.message.reply_text(text, parse_mode=parse_mode)
+    except BadRequest as e:
+        print(f"Reply parse/send error; retrying without parse_mode: {e}")
+        try:
+            return await update.message.reply_text(fallback_text or text)
+        except Exception as fallback_error:
+            print(f"Fallback reply failed: {fallback_error}")
+            try:
+                return await update.message.reply_text("Sorry, something went wrong while sending the response. Please try again.")
+            except Exception as final_error:
+                print(f"Final fallback reply failed: {final_error}")
+                return None
+    except Exception as e:
+        print(f"Reply failed: {e}")
+        try:
+            return await update.message.reply_text(fallback_text or "Sorry, something went wrong while sending the response. Please try again.")
+        except Exception as fallback_error:
+            print(f"Fallback reply failed: {fallback_error}")
+            return None
+
+async def call_account_api(func, *args, **kwargs):
+    """Run blocking account API helpers off the event loop with a hard async timeout."""
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(func, *args, **kwargs),
+            timeout=REQUEST_TIMEOUT + 5,
+        )
+    except asyncio.TimeoutError:
+        return {"error": {"message": "REQUEST_TIMEOUT"}}
+    except Exception as e:
+        return {"error": {"message": f"REQUEST_ERROR: {e}"}}
+
+    if not isinstance(result, dict):
+        return {"error": {"message": "INVALID_ACCOUNT_API_RESPONSE"}}
+
+    return result
+
+def account_error_message(response, default="Unknown error"):
+    """Extract a safe, user-displayable account API error message."""
+    if isinstance(response, dict):
+        error = response.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or default)
+        if error:
+            return str(error)
+    return default
     
 # ==== START FUNCTION =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1058,26 +1116,33 @@ Use /stop to stop recovery and save progress.
         api_key = context.user_data['api_key']
         game_name = context.user_data['login_game']
 
-        # simulate loading
-        await context.bot.send_chat_action(update.effective_chat.id, "typing")
-        await asyncio.sleep(2)
+        try:
+            await context.bot.send_chat_action(update.effective_chat.id, "typing")
+        except Exception as e:
+            print(f"Typing action failed during login: {e}")
 
-        resp = await asyncio.to_thread(login_request, email, password, api_key)
-        if "idToken" not in resp:
-            error_msg = resp.get("error", {}).get("message", "Unknown error")
-            await update.message.reply_text(f"❌ Login failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+        try:
+            resp = await call_account_api(login_request, email, password, api_key)
+            if "idToken" not in resp:
+                error_msg = account_error_message(resp)
+                await safe_reply_text(update, f"❌ Login failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+                context.user_data.clear()
+                return
+
+            sessions[user_id] = {
+                "id_token": resp["idToken"],
+                "email": resp.get("email", email),
+                "game_name": game_name,
+                "api_key": api_key
+            }
+            await safe_reply_text(update, f"✅ Logged in as {sessions[user_id]['email']} ({game_name})\n\n" + build_menu_text(user_id), parse_mode="Markdown")
             context.user_data.clear()
             return
-
-        sessions[user_id] = {
-            "id_token": resp["idToken"],
-            "email": resp.get("email", email),
-            "game_name": game_name,
-            "api_key": api_key
-        }
-        await update.message.reply_text(f"✅ Logged in as {sessions[user_id]['email']} ({game_name})\n\n" + build_menu_text(user_id), parse_mode="Markdown")
-        context.user_data.clear()
-        return
+        except Exception as e:
+            print(f"Login flow error for user {user_id}: {e}")
+            await safe_reply_text(update, "❌ Login failed because of an unexpected error. Please try again.")
+            context.user_data.clear()
+            return
 
     # ----- CHANGE EMAIL -----
     elif step == 'changemail':
@@ -1088,19 +1153,27 @@ Use /stop to stop recovery and save progress.
         new_email = raw_text
         s = sessions[user_id]
 
-        await context.bot.send_chat_action(update.effective_chat.id, "typing")
-        await asyncio.sleep(1.5)
+        try:
+            await context.bot.send_chat_action(update.effective_chat.id, "typing")
+        except Exception as e:
+            print(f"Typing action failed during email change: {e}")
 
-        change_resp = await asyncio.to_thread(update_request, s['id_token'], s['api_key'], new_email=new_email)
-        if "email" in change_resp:
-            s['email'] = change_resp['email']
-            s['id_token'] = change_resp.get('idToken', s['id_token'])
-            await update.message.reply_text(f"✉️ Email updated to {s['email']}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
-        else:
-            error_msg = change_resp.get("error", {}).get("message", "Unknown error")
-            await update.message.reply_text(f"❌ Failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
-        context.user_data.clear()
-        return
+        try:
+            change_resp = await call_account_api(update_request, s['id_token'], s['api_key'], new_email=new_email)
+            if "email" in change_resp:
+                s['email'] = change_resp['email']
+                s['id_token'] = change_resp.get('idToken', s['id_token'])
+                await safe_reply_text(update, f"✉️ Email updated to {s['email']}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+            else:
+                error_msg = account_error_message(change_resp)
+                await safe_reply_text(update, f"❌ Failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+            context.user_data.clear()
+            return
+        except Exception as e:
+            print(f"Change-email flow error for user {user_id}: {e}")
+            await safe_reply_text(update, "❌ Failed to change email because of an unexpected error. Please try again.")
+            context.user_data.clear()
+            return
 
     # ----- CHANGE PASSWORD -----
     elif step == 'changepass':
@@ -1111,18 +1184,26 @@ Use /stop to stop recovery and save progress.
         new_pass = raw_text
         s = sessions[user_id]
 
-        await context.bot.send_chat_action(update.effective_chat.id, "typing")
-        await asyncio.sleep(1.5)
+        try:
+            await context.bot.send_chat_action(update.effective_chat.id, "typing")
+        except Exception as e:
+            print(f"Typing action failed during password change: {e}")
 
-        change_resp = await asyncio.to_thread(update_request, s['id_token'], s['api_key'], new_password=new_pass)
-        if "idToken" in change_resp:
-            s['id_token'] = change_resp['idToken']
-            await update.message.reply_text(f"🔑 Password changed successfully\n\n" + build_menu_text(user_id), parse_mode="Markdown")
-        else:
-            error_msg = change_resp.get("error", {}).get("message", "Unknown error")
-            await update.message.reply_text(f"❌ Failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
-        context.user_data.clear()
-        return
+        try:
+            change_resp = await call_account_api(update_request, s['id_token'], s['api_key'], new_password=new_pass)
+            if "idToken" in change_resp:
+                s['id_token'] = change_resp['idToken']
+                await safe_reply_text(update, f"🔑 Password changed successfully\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+            else:
+                error_msg = account_error_message(change_resp)
+                await safe_reply_text(update, f"❌ Failed: {error_msg}\n\n" + build_menu_text(user_id), parse_mode="Markdown")
+            context.user_data.clear()
+            return
+        except Exception as e:
+            print(f"Change-password flow error for user {user_id}: {e}")
+            await safe_reply_text(update, "❌ Failed to change password because of an unexpected error. Please try again.")
+            context.user_data.clear()
+            return
 
     # ----- UNRECOGNIZED INPUT -----
     else:
